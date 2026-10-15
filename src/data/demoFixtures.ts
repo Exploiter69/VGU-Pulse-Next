@@ -13,8 +13,9 @@ export const VERIFIED_RESOURCE_LINKS: VerifiedResourceLink[] = [
     category: 'Official Portal',
     url: 'https://vgu.ac.in',
     sourceLabel: 'vgu.ac.in (Verified Official Domain)',
-    description: 'Primary university portal for official notices, admissions, and department pages.',
-    lastVerifiedLabel: 'Verified URL Format',
+    description:
+      'Primary university portal for official notices, admissions, and department pages.',
+    lastVerifiedLabel: 'Verified Official Domain',
     isOfficialDomain: true,
   },
   {
@@ -23,7 +24,8 @@ export const VERIFIED_RESOURCE_LINKS: VerifiedResourceLink[] = [
     category: 'Academic Reference',
     url: 'https://www.abc.gov.in',
     sourceLabel: 'abc.gov.in (Govt of India)',
-    description: 'Mandatory UGC Academic Bank of Credits portal required for semester exam forms.',
+    description:
+      'Mandatory UGC Academic Bank of Credits portal required for semester exam forms.',
     lastVerifiedLabel: 'Official National Portal',
     isOfficialDomain: true,
   },
@@ -33,7 +35,8 @@ export const VERIFIED_RESOURCE_LINKS: VerifiedResourceLink[] = [
     category: 'Academic Reference',
     url: 'https://internship.aicte-india.org',
     sourceLabel: 'aicte-india.org',
-    description: 'Verified government and corporate summer/winter internship listings for degree students.',
+    description:
+      'Verified government and corporate summer/winter internship listings for degree students.',
     lastVerifiedLabel: 'Official National Portal',
     isOfficialDomain: true,
   },
@@ -43,7 +46,8 @@ export const VERIFIED_RESOURCE_LINKS: VerifiedResourceLink[] = [
     category: 'Academic Reference',
     url: 'https://swayam.gov.in',
     sourceLabel: 'swayam.gov.in',
-    description: 'MOOC courses frequently used for credit transfer and honors specialization requirements.',
+    description:
+      'MOOC courses frequently used for credit transfer and honors specialization requirements.',
     lastVerifiedLabel: 'Official National Portal',
     isOfficialDomain: true,
   },
@@ -147,19 +151,6 @@ export const DEMO_CAMPUS_EVENTS: CampusEvent[] = [
     goingCount: 52,
     lookingForBuddyCount: 14,
   },
-  {
-    id: 'demo-evt-3',
-    title: '[DEMO] Acoustic Jam & Photography Walk at Golden Hour',
-    organizer: 'Cultural & Media Society Sample Fixture',
-    category: 'Cultural',
-    dateLabel: 'Fri, Oct 30',
-    timeLabel: '4:30 PM – 6:00 PM',
-    venue: 'Campus Amphitheatre Lawn (Demo)',
-    verificationSource: 'Club Submitted (Demo)',
-    isDemoFixture: true,
-    goingCount: 41,
-    lookingForBuddyCount: 11,
-  },
 ];
 
 export const INITIAL_DEMO_TASKS: PlannerTask[] = [
@@ -195,6 +186,7 @@ export const DEMO_HANDSHAKE_REQUESTS: HandshakeRequest[] = [
     status: 'pending',
     createdAtLabel: '20m ago (Demo)',
     isDemoFixture: true,
-    revealedContactNote: 'Contact stays hidden until you click Accept.',
+    revealedContactNote:
+      'Demo mode: Accept to preview how your private coordination note is revealed.',
   },
 ];
