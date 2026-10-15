@@ -1,7 +1,7 @@
 export interface AttendanceInput {
   attended: number;
   totalHeld: number;
-  targetPercentage: number; // Configurable, e.g., 75
+  targetPercentage: number;
   simulateAttendNext?: number;
   simulateMissNext?: number;
 }
@@ -104,20 +104,15 @@ export function calculateAttendance(input: AttendanceInput): AttendanceResult {
       ? Number(((projectedAttended / projectedTotal) * 100).toFixed(2))
       : currentPercentage;
 
-  // Calculate from projected state
   let classesCanSkipSafely = 0;
   let classesMustAttendToRecover = 0;
 
   if (projectedPercentage >= targetPercentage) {
-    // (projectedAttended) / (projectedTotal + skip) >= targetRatio
-    // skip <= (projectedAttended / targetRatio) - projectedTotal
     classesCanSkipSafely = Math.max(
       0,
       Math.floor(projectedAttended / targetRatio - projectedTotal)
     );
   } else {
-    // (projectedAttended + need) / (projectedTotal + need) >= targetRatio
-    // need >= (targetRatio * projectedTotal - projectedAttended) / (1 - targetRatio)
     classesMustAttendToRecover = Math.max(
       1,
       Math.ceil(
@@ -136,9 +131,13 @@ export function calculateAttendance(input: AttendanceInput): AttendanceResult {
   const summaryText =
     projectedPercentage >= targetPercentage
       ? classesCanSkipSafely > 0
-        ? `You can safely miss ${classesCanSkipSafely} upcoming ${classesCanSkipSafely === 1 ? 'class' : 'classes'} and stay at or above ${targetPercentage}%.`
+        ? `You can safely miss ${classesCanSkipSafely} upcoming ${
+            classesCanSkipSafely === 1 ? 'class' : 'classes'
+          } and stay at or above ${targetPercentage}%.`
         : `You are right on the ${targetPercentage}% boundary. Attending the next class builds a buffer.`
-      : `Attend the next ${classesMustAttendToRecover} consecutive ${classesMustAttendToRecover === 1 ? 'class' : 'classes'} to reach ${targetPercentage}%.`;
+      : `Attend the next ${classesMustAttendToRecover} consecutive ${
+          classesMustAttendToRecover === 1 ? 'class' : 'classes'
+        } to reach ${targetPercentage}%.`;
 
   return {
     isValid: true,
