@@ -161,10 +161,12 @@ export async function decryptCoordinationNote(
     // Copy the parsed IV into a definite ArrayBuffer for Web Crypto's BufferSource types.
     const ivBuffer = new ArrayBuffer(iv.byteLength);
     new Uint8Array(ivBuffer).set(iv);
+    const cipherBuffer = new ArrayBuffer(cipherBytes.byteLength);
+    new Uint8Array(cipherBuffer).set(cipherBytes);
     const plainBuffer = await crypto.subtle.decrypt(
       { name: 'AES-GCM', iv: ivBuffer },
       key,
-      cipherBytes
+      cipherBuffer
     );
     const plaintext = new TextDecoder().decode(plainBuffer);
     return { ok: true, plaintext };
