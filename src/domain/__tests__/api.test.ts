@@ -196,7 +196,6 @@ function createStatefulD1Mock(): { db: D1Database; store: InternalStore } {
           // Support the atomic INSERT ... SELECT admission predicate used by the real D1 query.
           if (sql.includes('SELECT ?1, ?2, ?3')) {
             const rateKey = String(boundArgs[1]);
-            const timestampMs = Number(boundArgs[2]);
             const windowStartMs = Number(boundArgs[3]);
             const maxHits = Number(boundArgs[4]);
             const activeHits = store.rateLimitEvents.filter(
