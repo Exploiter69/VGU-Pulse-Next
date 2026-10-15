@@ -111,7 +111,7 @@ export async function encryptCoordinationNote(
   secret: string
 ): Promise<string> {
   const key = await deriveAesGcmKey(secret);
-  const iv = new Uint8Array(12);
+  const iv = new Uint8Array(new ArrayBuffer(12));
   crypto.getRandomValues(iv);
 
   const encoded = new TextEncoder().encode(plaintext);

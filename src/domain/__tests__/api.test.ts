@@ -62,6 +62,7 @@ function createStatefulD1Mock(): { db: D1Database; store: InternalStore } {
     if (!card) return null;
     return {
       ...hs,
+      sender_token_hash: hs.sender_token_hash,
       card_title: card.title,
       card_coordination_note: card.coordination_note,
       card_channel: card.preferred_handshake_channel,
@@ -192,6 +193,19 @@ function createStatefulD1Mock(): { db: D1Database; store: InternalStore } {
           return { meta: { changes: before - store.rateLimitEvents.length } };
         }
         if (sql.includes('INSERT INTO rate_limit_events')) {
+          // Support the atomic INSERT ... SELECT admission predicate used by the real D1 query.
+          if (sql.includes('SELECT ?1, ?2, ?3')) {
+            const rateKey = String(boundArgs[1]);
+            const timestampMs = Number(boundArgs[2]);
+            const windowStartMs = Number(boundArgs[3]);
+            const maxHits = Number(boundArgs[4]);
+            const activeHits = store.rateLimitEvents.filter(
+              (e) => e.rate_key === rateKey && e.timestamp_ms > windowStartMs
+            ).length;
+            if (activeHits >= maxHits) {
+              return { meta: { changes: 0 } };
+            }
+          }
           store.rateLimitEvents.push({
             id: String(boundArgs[0]),
             rate_key: String(boundArgs[1]),
