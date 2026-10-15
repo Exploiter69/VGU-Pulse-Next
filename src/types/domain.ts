@@ -21,6 +21,13 @@ export type HandshakeChannel =
   | 'Telegram'
   | 'In-Person Campus Meet';
 
+export type EventVerificationSource =
+  | 'Official VGU Link'
+  | 'External Govt / Public Portal'
+  | 'Verified Club Submission'
+  | 'Student Submitted (Unverified)'
+  | 'Club Submitted (Demo)';
+
 export interface PulseCard {
   id: string;
   title: string;
@@ -56,6 +63,7 @@ export interface CreatePulseCardInput {
 }
 
 export interface CreatePulseCardResponse {
+  ok: true;
   card: PulseCard;
   ownerCapabilityToken: string;
 }
@@ -69,11 +77,7 @@ export interface CampusEvent {
   timeLabel: string;
   venue: string;
   registrationUrl?: string;
-  verificationSource:
-    | 'Official VGU Link'
-    | 'Verified Club Submission'
-    | 'Student Submitted (Unverified)'
-    | 'Club Submitted (Demo)';
+  verificationSource: EventVerificationSource;
   isDemoFixture: boolean;
   goingCount: number;
   lookingForBuddyCount: number;
@@ -124,6 +128,7 @@ export interface CreateHandshakeInput {
 }
 
 export interface CreateHandshakeResponse {
+  ok: true;
   handshake: HandshakeRequest;
   senderCapabilityToken: string;
 }
@@ -133,6 +138,8 @@ export interface CapabilityVault {
   ownedCards: Record<string, string>;
   /** Maps handshakeId -> raw senderCapabilityToken */
   sentHandshakes: Record<string, string>;
+  /** Persistent anonymous capability token for idempotent event buddy participation */
+  participantToken?: string;
 }
 
 export interface CourseGradeRow {

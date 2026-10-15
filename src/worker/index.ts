@@ -1,23 +1,28 @@
 import {
   validateCreateCardPayload,
   validateCreateHandshakePayload,
+  validateEventBuddyPayload,
 } from '../domain/validation';
+import { resolveEncryptionSecret, sha256Hex } from './crypto';
 import {
   buildCardOgMetadata,
   buildEventOgMetadata,
   rewriteHtmlWithOgMetadata,
 } from './ogRewriter';
-import { checkAndIncrementRateLimit } from './rateLimit';
+import {
+  checkAndIncrementRateLimit,
+  resolveRateLimitSalt,
+} from './rateLimit';
 import {
   createCardRecord,
   createHandshakeRecord,
   getPublicCardById,
   getPublicEventById,
-  incrementCardReportCount,
   listAuthorizedHandshakes,
   listPublicCards,
   listPublicEvents,
-  updateEventBuddyCounter,
+  reportCardWithDeduplication,
+  updateEventBuddyParticipation,
   updateHandshakeDecision,
 } from './repository';
 import { verifyTurnstileToken } from './turnstile';
@@ -30,6 +35,7 @@ export interface Env {
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET_KEY?: string;
   RATE_LIMIT_SALT?: string;
+  COORDINATION_ENCRYPTION_KEY?: string;
 }
 
 const MAX_BODY_BYTES = 16_384; // 16 KB strict payload ceiling
@@ -40,6 +46,8 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
       'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Referrer-Policy': 'strict-origin-when-cross-origin',
       'Cache-Control': 'no-store',
     },
   });
@@ -62,6 +70,20 @@ function errorResponse(
     },
     status
   );
+}
+
+function validateMutationOrigin(request: Request, env: Env): boolean {
+  const originHeader = request.headers.get('Origin');
+  if (!originHeader) {
+    // Allow non-browser or same-origin requests without Origin header
+    return true;
+  }
+  const reqOrigin = new URL(request.url).origin;
+  if (originHeader === reqOrigin) return true;
+  if (env.PUBLIC_ORIGIN && originHeader === env.PUBLIC_ORIGIN.replace(/\/$/, '')) {
+    return true;
+  }
+  return false;
 }
 
 async function readBoundedJson(
@@ -125,11 +147,22 @@ export default {
     const appEnv = env.APP_ENV || 'development';
     const clientIp =
       request.headers.get('CF-Connecting-IP') ||
-      request.headers.get('X-Forwarded-For') ||
+      request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
       '127.0.0.1';
-    const salt = env.RATE_LIMIT_SALT || 'default-vgu-pulse-salt';
 
     try {
+      // Reject cross-origin state-changing requests
+      if (
+        (method === 'POST' || method === 'PATCH' || method === 'DELETE') &&
+        !validateMutationOrigin(request, env)
+      ) {
+        return errorResponse(
+          'FORBIDDEN_ORIGIN',
+          'Cross-origin mutation requests are not permitted.',
+          403
+        );
+      }
+
       // =========================================================
       // 1. API ROUTES (/api/*)
       // =========================================================
@@ -159,6 +192,19 @@ export default {
 
       // POST /api/cards
       if (pathname === '/api/cards' && method === 'POST') {
+        const encConfig = resolveEncryptionSecret(
+          appEnv,
+          env.COORDINATION_ENCRYPTION_KEY
+        );
+        if (!encConfig.ok) {
+          return errorResponse(encConfig.code, encConfig.message, 503);
+        }
+
+        const saltConfig = resolveRateLimitSalt(appEnv, env.RATE_LIMIT_SALT);
+        if (!saltConfig.ok) {
+          return errorResponse(saltConfig.code, saltConfig.message, 503);
+        }
+
         const parsed = await readBoundedJson(request);
         if (!parsed.ok) return parsed.response;
 
@@ -188,19 +234,23 @@ export default {
         const rate = await checkAndIncrementRateLimit(
           env.DB,
           clientIp,
-          salt,
+          saltConfig.salt,
           'create_card',
           5
         );
         if (!rate.allowed) {
           return errorResponse(
             'RATE_LIMITED',
-            'Rate limit reached: You can publish at most 5 request cards per hour.',
+            'Rate limit reached: You can publish at most 5 request cards per rolling 60-minute window.',
             429
           );
         }
 
-        const created = await createCardRecord(env.DB, validation.data);
+        const created = await createCardRecord(
+          env.DB,
+          validation.data,
+          encConfig.secret
+        );
         return jsonResponse(
           {
             ok: true,
@@ -230,10 +280,15 @@ export default {
         }
 
         if (isReport && method === 'POST') {
+          const saltConfig = resolveRateLimitSalt(appEnv, env.RATE_LIMIT_SALT);
+          if (!saltConfig.ok) {
+            return errorResponse(saltConfig.code, saltConfig.message, 503);
+          }
+
           const rate = await checkAndIncrementRateLimit(
             env.DB,
             clientIp,
-            salt,
+            saltConfig.salt,
             'report_card',
             10
           );
@@ -244,11 +299,22 @@ export default {
               429
             );
           }
-          const updated = await incrementCardReportCount(env.DB, cardId);
-          if (!updated) {
+
+          const reporterHash = await sha256Hex(
+            `report:${clientIp}:${saltConfig.salt}:${cardId}`
+          );
+          const reportOutcome = await reportCardWithDeduplication(
+            env.DB,
+            cardId,
+            reporterHash
+          );
+          if (!reportOutcome.found) {
             return errorResponse('CARD_NOT_FOUND', 'Card not found.', 404);
           }
-          return jsonResponse({ ok: true });
+          return jsonResponse({
+            ok: true,
+            alreadyReported: reportOutcome.alreadyReported,
+          });
         }
       }
 
@@ -277,28 +343,87 @@ export default {
         }
 
         if (isBuddyAction && method === 'POST') {
+          const saltConfig = resolveRateLimitSalt(appEnv, env.RATE_LIMIT_SALT);
+          if (!saltConfig.ok) {
+            return errorResponse(saltConfig.code, saltConfig.message, 503);
+          }
+
+          const rate = await checkAndIncrementRateLimit(
+            env.DB,
+            clientIp,
+            saltConfig.salt,
+            'event_buddy',
+            30
+          );
+          if (!rate.allowed) {
+            return errorResponse(
+              'RATE_LIMITED',
+              'Too many event participation updates from this connection.',
+              429
+            );
+          }
+
           const parsed = await readBoundedJson(request);
           if (!parsed.ok) return parsed.response;
-          const body = parsed.data as Record<string, unknown>;
-          const direction = body?.direction === 'leave' ? 'leave' : 'join';
-          const updated = await updateEventBuddyCounter(
+
+          const headerToken = request.headers
+            .get('X-Pulse-Participant-Token')
+            ?.trim();
+          const rawBody =
+            parsed.data && typeof parsed.data === 'object'
+              ? (parsed.data as Record<string, unknown>)
+              : {};
+          const mergedPayload = {
+            ...rawBody,
+            participantToken: rawBody.participantToken || headerToken,
+          };
+
+          const validation = validateEventBuddyPayload(mergedPayload);
+          if (!validation.valid) {
+            return errorResponse(
+              validation.code,
+              validation.message,
+              400,
+              validation.field
+            );
+          }
+
+          const updated = await updateEventBuddyParticipation(
             env.DB,
             eventId,
-            direction
+            validation.data.participantToken,
+            validation.data.direction
           );
-          if (!updated) {
+          if (!updated.event) {
             return errorResponse(
               'EVENT_NOT_FOUND',
               'Campus event not found.',
               404
             );
           }
-          return jsonResponse({ ok: true, event: updated });
+          return jsonResponse({
+            ok: true,
+            event: updated.event,
+            changed: updated.changed,
+          });
         }
       }
 
       // POST /api/handshakes
       if (pathname === '/api/handshakes' && method === 'POST') {
+        const encConfig = resolveEncryptionSecret(
+          appEnv,
+          env.COORDINATION_ENCRYPTION_KEY
+        );
+        if (!encConfig.ok) {
+          return errorResponse(encConfig.code, encConfig.message, 503);
+        }
+
+        const saltConfig = resolveRateLimitSalt(appEnv, env.RATE_LIMIT_SALT);
+        if (!saltConfig.ok) {
+          return errorResponse(saltConfig.code, saltConfig.message, 503);
+        }
+
         const parsed = await readBoundedJson(request);
         if (!parsed.ok) return parsed.response;
 
@@ -328,19 +453,23 @@ export default {
         const rate = await checkAndIncrementRateLimit(
           env.DB,
           clientIp,
-          salt,
+          saltConfig.salt,
           'create_handshake',
           15
         );
         if (!rate.allowed) {
           return errorResponse(
             'RATE_LIMITED',
-            'Rate limit reached: Maximum 15 handshake requests per hour.',
+            'Rate limit reached: Maximum 15 handshake requests per rolling 60-minute window.',
             429
           );
         }
 
-        const created = await createHandshakeRecord(env.DB, validation.data);
+        const created = await createHandshakeRecord(
+          env.DB,
+          validation.data,
+          encConfig.secret
+        );
         if (!created.ok) {
           return errorResponse(created.code, created.message, created.status);
         }
@@ -357,6 +486,14 @@ export default {
 
       // POST /api/handshakes/sync (Protected by capability tokens in body)
       if (pathname === '/api/handshakes/sync' && method === 'POST') {
+        const encConfig = resolveEncryptionSecret(
+          appEnv,
+          env.COORDINATION_ENCRYPTION_KEY
+        );
+        if (!encConfig.ok) {
+          return errorResponse(encConfig.code, encConfig.message, 503);
+        }
+
         const parsed = await readBoundedJson(request);
         if (!parsed.ok) return parsed.response;
 
@@ -371,7 +508,8 @@ export default {
         const handshakes = await listAuthorizedHandshakes(
           env.DB,
           ownerTokens,
-          senderTokens
+          senderTokens,
+          encConfig.secret
         );
         return jsonResponse({ ok: true, handshakes });
       }
@@ -379,12 +517,20 @@ export default {
       // PATCH /api/handshakes/:id (Accept / Decline protected by owner capability token)
       const handshakePatchMatch = pathname.match(/^\/api\/handshakes\/([^/]+)$/);
       if (handshakePatchMatch && method === 'PATCH') {
+        const encConfig = resolveEncryptionSecret(
+          appEnv,
+          env.COORDINATION_ENCRYPTION_KEY
+        );
+        if (!encConfig.ok) {
+          return errorResponse(encConfig.code, encConfig.message, 503);
+        }
+
         const handshakeId = decodeURIComponent(handshakePatchMatch[1]);
         const token = extractBearerOrCapabilityToken(request);
-        if (!token) {
+        if (!token || token.length < 32) {
           return errorResponse(
             'UNAUTHORIZED',
-            'Missing card owner capability token.',
+            'Missing or invalid card-owner capability token.',
             401
           );
         }
@@ -407,7 +553,8 @@ export default {
           env.DB,
           handshakeId,
           token,
-          status
+          status,
+          encConfig.secret
         );
         if (!outcome.ok) {
           return errorResponse(outcome.code, outcome.message, outcome.status);

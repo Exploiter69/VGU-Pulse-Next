@@ -28,9 +28,11 @@ export const ALLOWED_CHANNELS: readonly HandshakeChannel[] = [
   'In-Person Campus Meet',
 ];
 
-// Detects 10-digit Indian phone numbers (with optional +91/0 prefix) or email addresses in public text
-const PUBLIC_PII_PHONE_REGEX = /(?:\+91[\s-]?)?[6-9]\d{9}\b/;
-const PUBLIC_PII_EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+// Detects 10-digit Indian mobile numbers even when spaced or hyphenated (e.g. "98765 43210", "+91-98765-43210")
+const PUBLIC_PII_PHONE_REGEX =
+  /(?:\+91[\s.-]?)?[6-9](?:[\s.-]?\d){9}\b/;
+const PUBLIC_PII_EMAIL_REGEX =
+  /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
 export interface ValidationFailure {
   valid: false;
@@ -53,7 +55,7 @@ export function containsPublicContactPii(text: string): boolean {
 export function validateCreateCardPayload(
   raw: unknown
 ): ValidationOutcome<CreatePulseCardInput> {
-  if (!raw || typeof raw !== 'object') {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return {
       valid: false,
       code: 'INVALID_JSON',
@@ -83,7 +85,9 @@ export function validateCreateCardPayload(
       : '';
   const spotsTotal = Number(body.spotsTotal);
   const turnstileToken =
-    typeof body.turnstileToken === 'string' ? body.turnstileToken.trim() : undefined;
+    typeof body.turnstileToken === 'string'
+      ? body.turnstileToken.trim()
+      : undefined;
 
   if (title.length < 10 || title.length > 120) {
     return {
@@ -112,13 +116,18 @@ export function validateCreateCardPayload(
     };
   }
 
-  if (containsPublicContactPii(title) || containsPublicContactPii(description)) {
+  if (
+    containsPublicContactPii(title) ||
+    containsPublicContactPii(description) ||
+    containsPublicContactPii(authorName) ||
+    containsPublicContactPii(timeWindow)
+  ) {
     return {
       valid: false,
       code: 'PUBLIC_PII_DETECTED',
       field: 'description',
       message:
-        'Privacy boundary: Do not include phone numbers or email addresses in the public title or description. Put your meeting/contact details in the private Coordination Note instead.',
+        'Privacy boundary: Do not include phone numbers or email addresses in public fields. Put your meeting/contact details in the private Coordination Note instead.',
     };
   }
 
@@ -190,7 +199,7 @@ export function validateCreateCardPayload(
   const cleanTags = rawTags
     .filter((t): t is string => typeof t === 'string')
     .map((t) => t.trim().replace(/^#/, ''))
-    .filter((t) => t.length >= 2 && t.length <= 28)
+    .filter((t) => t.length >= 2 && t.length <= 28 && !containsPublicContactPii(t))
     .slice(0, 5);
 
   return {
@@ -215,7 +224,7 @@ export function validateCreateCardPayload(
 export function validateCreateHandshakePayload(
   raw: unknown
 ): ValidationOutcome<CreateHandshakeInput> {
-  if (!raw || typeof raw !== 'object') {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return {
       valid: false,
       code: 'INVALID_JSON',
@@ -233,7 +242,9 @@ export function validateCreateHandshakePayload(
   const introNote =
     typeof body.introNote === 'string' ? body.introNote.trim() : '';
   const turnstileToken =
-    typeof body.turnstileToken === 'string' ? body.turnstileToken.trim() : undefined;
+    typeof body.turnstileToken === 'string'
+      ? body.turnstileToken.trim()
+      : undefined;
 
   if (!cardId || cardId.length > 80) {
     return {
@@ -280,6 +291,16 @@ export function validateCreateHandshakePayload(
     };
   }
 
+  if (containsPublicContactPii(fromStudentName) || containsPublicContactPii(introNote)) {
+    return {
+      valid: false,
+      code: 'PUBLIC_PII_DETECTED',
+      field: 'introNote',
+      message:
+        'Privacy boundary: Do not include raw phone numbers or email addresses in your intro note. Once the card owner accepts, their private coordination instructions will be revealed to you.',
+    };
+  }
+
   return {
     valid: true,
     data: {
@@ -289,6 +310,56 @@ export function validateCreateHandshakePayload(
       fromYear,
       introNote,
       turnstileToken,
+    },
+  };
+}
+
+export function validateEventBuddyPayload(raw: unknown): ValidationOutcome<{
+  direction: 'join' | 'leave';
+  participantToken: string;
+}> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {
+      valid: false,
+      code: 'INVALID_JSON',
+      message: 'Request body must be a JSON object.',
+    };
+  }
+
+  const body = raw as Record<string, unknown>;
+  const direction = body.direction;
+  const participantToken =
+    typeof body.participantToken === 'string'
+      ? body.participantToken.trim()
+      : '';
+
+  if (direction !== 'join' && direction !== 'leave') {
+    return {
+      valid: false,
+      code: 'INVALID_DIRECTION',
+      field: 'direction',
+      message: 'Direction must be "join" or "leave".',
+    };
+  }
+
+  if (
+    participantToken.length < 16 ||
+    participantToken.length > 128 ||
+    !/^[a-zA-Z0-9_-]+$/.test(participantToken)
+  ) {
+    return {
+      valid: false,
+      code: 'INVALID_PARTICIPANT_TOKEN',
+      field: 'participantToken',
+      message: 'A valid anonymous participant capability token is required.',
+    };
+  }
+
+  return {
+    valid: true,
+    data: {
+      direction,
+      participantToken,
     },
   };
 }

@@ -9,6 +9,7 @@ import {
   PulseCard,
   PulseCategory,
 } from '../types/domain';
+import { getOrCreateParticipantToken } from './storage';
 
 export class ApiClientError extends Error {
   public readonly code: string;
@@ -81,11 +82,13 @@ export async function createSharedCard(
   return parseJsonResponse<CreatePulseCardResponse>(res);
 }
 
-export async function reportSharedCard(cardId: string): Promise<{ ok: true }> {
+export async function reportSharedCard(
+  cardId: string
+): Promise<{ ok: true; alreadyReported?: boolean }> {
   const res = await fetch(`/api/cards/${encodeURIComponent(cardId)}/report`, {
     method: 'POST',
   });
-  return parseJsonResponse<{ ok: true }>(res);
+  return parseJsonResponse<{ ok: true; alreadyReported?: boolean }>(res);
 }
 
 export async function fetchSharedEvents(): Promise<CampusEvent[]> {
@@ -96,15 +99,25 @@ export async function fetchSharedEvents(): Promise<CampusEvent[]> {
 
 export async function toggleSharedEventBuddy(
   eventId: string,
-  direction: 'join' | 'leave'
-): Promise<CampusEvent> {
+  direction: 'join' | 'leave',
+  explicitParticipantToken?: string
+): Promise<{ event: CampusEvent; changed: boolean }> {
+  const participantToken =
+    explicitParticipantToken || getOrCreateParticipantToken();
   const res = await fetch(`/api/events/${encodeURIComponent(eventId)}/buddy`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ direction }),
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Pulse-Participant-Token': participantToken,
+    },
+    body: JSON.stringify({ direction, participantToken }),
   });
-  const data = await parseJsonResponse<{ ok: true; event: CampusEvent }>(res);
-  return data.event;
+  const data = await parseJsonResponse<{
+    ok: true;
+    event: CampusEvent;
+    changed: boolean;
+  }>(res);
+  return { event: data.event, changed: data.changed };
 }
 
 export async function createSharedHandshake(

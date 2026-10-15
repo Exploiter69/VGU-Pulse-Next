@@ -68,6 +68,7 @@ import {
   reportSharedCard,
   toggleSharedEventBuddy,
 } from './services/apiClient';
+import { containsPublicContactPii } from './domain/validation';
 
 const CATEGORY_META: Record<
   PulseCategory,
@@ -99,8 +100,6 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('home');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Explicit Data Source Mode: 'shared_api' (Cloudflare Worker + D1) vs 'local_demo' (Stage 1 Sandbox Fixtures)
-  // Never silently mixes demo fixtures with live shared database rows.
   const [dataMode, setDataMode] = useState<DataSourceMode>(() =>
     loadLocalState<DataSourceMode>('data_mode', 'shared_api')
   );
@@ -108,7 +107,6 @@ export default function App() {
   const [apiError, setApiError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
-  // Deep-link URL inspection (/cards/:id or /events/:id or ?card= / ?event=)
   const [deepLinkNotice, setDeepLinkNotice] = useState<string | null>(null);
 
   // --- Toolkit State (Always 100% Local-First & Offline Capable) ---
@@ -196,7 +194,6 @@ export default function App() {
   );
   const [createError, setCreateError] = useState<string | null>(null);
 
-  // Sync local-first settings to localStorage
   useEffect(() => saveLocalState('data_mode', dataMode), [dataMode]);
   useEffect(() => saveLocalState('att_attended', attended), [attended]);
   useEffect(() => saveLocalState('att_total', totalHeld), [totalHeld]);
@@ -216,7 +213,6 @@ export default function App() {
     window.setTimeout(() => setToastMessage(null), 4000);
   };
 
-  // Load Shared Data from Cloudflare Worker D1 API
   const refreshSharedData = useCallback(async () => {
     if (dataMode !== 'shared_api') return;
     setApiLoading(true);
@@ -246,7 +242,6 @@ export default function App() {
     refreshSharedData();
   }, [refreshSharedData]);
 
-  // Handle incoming share URLs (/cards/:id, /events/:id, ?card=, ?event=)
   useEffect(() => {
     const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
@@ -266,13 +261,11 @@ export default function App() {
     }
   }, []);
 
-  // Select active datasets based on explicit mode (Never mixed silently)
   const activeCards = dataMode === 'shared_api' ? sharedCards : demoCards;
   const activeEvents = dataMode === 'shared_api' ? sharedEvents : demoEvents;
   const activeHandshakes =
     dataMode === 'shared_api' ? sharedHandshakes : demoHandshakes;
 
-  // Calculations
   const attendanceResult = useMemo(
     () =>
       calculateAttendance({
@@ -314,7 +307,6 @@ export default function App() {
       });
   }, [activeCards, reportedIds, selectedCategory, searchQuery]);
 
-  // Share Handlers
   const handleShareCard = async (card: PulseCard, directWhatsApp = false) => {
     const payload = buildCardSharePayload(card, window.location.origin);
     if (directWhatsApp) {
@@ -355,7 +347,6 @@ export default function App() {
     }
   };
 
-  // Create Card Submission (Server-Confirmed in shared_api mode)
   const handleCreateCardSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setCreateError(null);
@@ -395,7 +386,7 @@ export default function App() {
         setActiveTab('explore');
         setExploreSubTab('requests');
         triggerToast(
-          'Published to shared D1 database! Owner capability key saved in your browser.'
+          'Published to shared D1 with AES-GCM encrypted coordination note!'
         );
       } catch (err) {
         if (err instanceof ApiClientError) {
@@ -409,11 +400,12 @@ export default function App() {
       return;
     }
 
-    // Local Demo Sandbox Mode
-    const phoneRegex = /\b[6-9]\d{9}\b/;
-    if (phoneRegex.test(createTitle) || phoneRegex.test(createDesc)) {
+    if (
+      containsPublicContactPii(createTitle) ||
+      containsPublicContactPii(createDesc)
+    ) {
       setCreateError(
-        'Privacy Protection: Do not paste your phone number in public cards. Put meeting/contact instructions in the private Coordination Note.'
+        'Privacy Protection: Do not paste your phone number or email in public cards. Put meeting/contact instructions in the private Coordination Note.'
       );
       return;
     }
@@ -447,7 +439,6 @@ export default function App() {
     triggerToast('Created in Local Demo Sandbox.');
   };
 
-  // Send Handshake Request
   const handleSendHandshake = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeJoinCard) return;
@@ -488,7 +479,6 @@ export default function App() {
       return;
     }
 
-    // Local Demo Mode
     if (!joinName.trim() || joinNote.trim().length < 8) {
       triggerToast('Please enter your name and an intro note (8+ chars).');
       return;
@@ -516,7 +506,6 @@ export default function App() {
     triggerToast('Demo handshake queued in Connect tab.');
   };
 
-  // Accept / Decline Handshake
   const handleHandshakeDecision = async (
     hs: HandshakeRequest,
     decision: 'accepted' | 'declined'
@@ -538,8 +527,8 @@ export default function App() {
         await refreshSharedData();
         triggerToast(
           decision === 'accepted'
-            ? 'Handshake accepted! Your private coordination note is now visible to this requester.'
-            : 'Handshake declined.'
+            ? 'Handshake accepted! Your encrypted coordination note is now unlocked for this requester.'
+            : 'Handshake declined and capacity synchronized.'
         );
       } catch (err) {
         triggerToast(
@@ -553,7 +542,6 @@ export default function App() {
       return;
     }
 
-    // Local Demo Mode
     setDemoHandshakes((prev) =>
       prev.map((item) =>
         item.id === hs.id
@@ -562,7 +550,7 @@ export default function App() {
               status: decision,
               revealedContactNote:
                 decision === 'accepted'
-                  ? '✓ Demo Accepted: In Shared Mode, the owner coordination note is revealed here.'
+                  ? '✓ Demo Accepted: In Shared Mode, the owner coordination note is decrypted and revealed here.'
                   : 'Request declined.',
             }
           : item
@@ -571,27 +559,34 @@ export default function App() {
     triggerToast(`Demo handshake ${decision}.`);
   };
 
-  // Event Buddy Toggle
   const handleToggleEventBuddy = async (eventId: string) => {
     const alreadyIn = buddyRsvpIds.includes(eventId);
     const direction = alreadyIn ? 'leave' : 'join';
 
     if (dataMode === 'shared_api') {
       try {
-        const updated = await toggleSharedEventBuddy(eventId, direction);
+        const res = await toggleSharedEventBuddy(
+          eventId,
+          direction,
+          vault.participantToken
+        );
         setSharedEvents((prev) =>
-          prev.map((ev) => (ev.id === eventId ? updated : ev))
+          prev.map((ev) => (ev.id === eventId ? res.event : ev))
         );
         setBuddyRsvpIds((prev) =>
           alreadyIn ? prev.filter((id) => id !== eventId) : [...prev, eventId]
         );
         triggerToast(
           alreadyIn
-            ? 'Removed from event buddy count.'
-            : 'Updated shared event buddy count!'
+            ? 'Removed your participation from event buddy list.'
+            : 'Recorded your participation on this event!'
         );
-      } catch {
-        triggerToast('Could not update event buddy count on server.');
+      } catch (err) {
+        triggerToast(
+          err instanceof ApiClientError
+            ? err.message
+            : 'Could not update event buddy participation.'
+        );
       }
       return;
     }
@@ -615,13 +610,16 @@ export default function App() {
     triggerToast('Updated demo event buddy count.');
   };
 
-  // Report Card
   const handleReportCard = async (card: PulseCard) => {
     setReportedIds((prev) => [...prev, card.id]);
     if (dataMode === 'shared_api' && !card.isDemoFixture) {
       try {
-        await reportSharedCard(card.id);
-        triggerToast('Card reported to server & hidden from your view.');
+        const out = await reportSharedCard(card.id);
+        triggerToast(
+          out.alreadyReported
+            ? 'Card hidden (already reported from your connection).'
+            : 'Card reported to server & hidden from your view.'
+        );
         return;
       } catch {
         // Still hidden locally
@@ -698,7 +696,7 @@ export default function App() {
           </nav>
         </div>
 
-        {/* Explicit Data Mode Switcher (Never Silently Mixes Demo & Shared D1) */}
+        {/* Explicit Data Mode Switcher */}
         <div className="space-y-3">
           <div className="p-3.5 rounded-xl bg-[#FAF8F5] border border-[#E6E2DC] text-xs space-y-2">
             <div className="flex items-center justify-between font-semibold text-slate-800">
@@ -741,10 +739,10 @@ export default function App() {
           <div className="p-3.5 rounded-xl bg-stone-100/80 border border-[#E6E2DC] text-xs text-slate-600 space-y-1">
             <div className="flex items-center gap-1.5 font-semibold text-slate-800">
               <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
-              <span>Capability-Token Privacy</span>
+              <span>AES-GCM & Capability Keys</span>
             </div>
             <p className="leading-relaxed text-[11px]">
-              No account required. Card ownership & handshakes use hashed capability keys stored in your browser.
+              Coordination notes are encrypted at rest with AES-256-GCM. Ownership uses hashed capability tokens.
             </p>
           </div>
         </div>
@@ -824,7 +822,7 @@ export default function App() {
           </div>
         )}
 
-        {/* API Connection Error Banner (when in Shared D1 Mode) */}
+        {/* API Connection Error Banner */}
         {dataMode === 'shared_api' && apiError && (
           <div className="max-w-4xl mx-auto px-4 pt-3 md:px-8">
             <div
@@ -882,7 +880,6 @@ export default function App() {
              ========================================================= */}
           {activeTab === 'home' && (
             <div className="space-y-6">
-              {/* Hero Attendance + Quick Action Strip */}
               <section className="bg-white rounded-2xl border border-[#E6E2DC] p-5 shadow-2xs">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-stone-200">
                   <div>
@@ -941,7 +938,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Quick Metric Bar */}
                 <div className="grid grid-cols-3 gap-3 pt-4 text-center sm:text-left">
                   <button
                     onClick={() => setActiveTab('toolkit')}
@@ -1081,10 +1077,10 @@ export default function App() {
               <section className="space-y-3">
                 <div>
                   <h2 className="font-display font-bold text-base text-slate-900">
-                    Verified Academic & Official Portals
+                    Verified Academic & Public Portals
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Curated official external links (clearly separated from student posts)
+                    Curated external links clearly distinguishing VGU domains from national government portals
                   </p>
                 </div>
 
@@ -1124,7 +1120,6 @@ export default function App() {
              ========================================================= */}
           {activeTab === 'toolkit' && (
             <div className="space-y-6">
-              {/* 1. Attendance Calculator & Simulator */}
               <section className="bg-white rounded-2xl border border-[#E6E2DC] p-5 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 pb-3">
                   <div>
@@ -1192,7 +1187,6 @@ export default function App() {
                   </label>
                 </div>
 
-                {/* What-if Simulator */}
                 <div className="p-4 rounded-xl bg-[#FAF8F5] border border-[#E6E2DC] space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold text-slate-800">
@@ -1266,7 +1260,6 @@ export default function App() {
                 </div>
               </section>
 
-              {/* 2. SGPA / CGPA Estimator */}
               <section className="bg-white rounded-2xl border border-[#E6E2DC] p-5 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 pb-3">
                   <div>
@@ -1400,7 +1393,6 @@ export default function App() {
                 </div>
               </section>
 
-              {/* 3. Local Semester Planner & Deadlines */}
               <section className="bg-white rounded-2xl border border-[#E6E2DC] p-5 space-y-4">
                 <div>
                   <h2 className="font-display font-bold text-base text-slate-900">
@@ -1517,7 +1509,6 @@ export default function App() {
              ========================================================= */}
           {activeTab === 'explore' && (
             <div className="space-y-5">
-              {/* Sub-navigation switcher */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="inline-flex p-1 rounded-xl bg-stone-200/80 w-fit">
                   <button
@@ -1555,7 +1546,6 @@ export default function App() {
 
               {exploreSubTab === 'requests' ? (
                 <>
-                  {/* Search & Category Filter Pills */}
                   <div className="space-y-3">
                     <div className="relative">
                       <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
@@ -1594,7 +1584,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Cards List */}
                   {filteredCards.length === 0 ? (
                     <div className="bg-white rounded-2xl border border-[#E6E2DC] p-8 text-center space-y-3">
                       <p className="font-display font-bold text-base text-slate-800">
@@ -1743,12 +1732,15 @@ export default function App() {
                 <div className="space-y-4">
                   <div className="p-3.5 rounded-xl bg-stone-100 border border-[#E6E2DC] text-xs text-slate-700">
                     {dataMode === 'shared_api'
-                      ? 'Showing verified portal milestones from D1. Unverified events are never labelled as official.'
+                      ? 'Showing verified portal milestones from D1. External national portals are explicitly distinguished from official VGU sources.'
                       : 'Showing labelled Demo Sandbox events.'}
                   </div>
 
                   {activeEvents.map((evt) => {
                     const isBuddyJoined = buddyRsvpIds.includes(evt.id);
+                    const isOfficialOrGovt =
+                      evt.verificationSource === 'Official VGU Link' ||
+                      evt.verificationSource === 'External Govt / Public Portal';
                     return (
                       <article
                         key={evt.id}
@@ -1760,7 +1752,7 @@ export default function App() {
                           </span>
                           <span
                             className={`text-[11px] font-mono-num px-2 py-0.5 rounded border ${
-                              evt.verificationSource === 'Official VGU Link'
+                              isOfficialOrGovt
                                 ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
                                 : 'bg-amber-50 text-amber-900 border-amber-200'
                             }`}
@@ -1794,7 +1786,7 @@ export default function App() {
                                 rel="noopener noreferrer"
                                 className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-slate-800 text-xs font-semibold"
                               >
-                                Official Link
+                                Portal Link
                                 <ExternalLink className="w-3 h-3" />
                               </a>
                             )}
@@ -1848,7 +1840,7 @@ export default function App() {
                     Post a Structured Campus Request Card
                   </h2>
                   <p className="text-xs text-slate-600 mt-1">
-                    Public cards never expose phone numbers or emails. Your private coordination note is revealed only to peers whose handshake you accept.
+                    Public cards never expose phone numbers or emails. Your private coordination note is encrypted at rest (AES-256-GCM) and revealed only when you accept a handshake.
                   </p>
                 </div>
                 <span className="text-xs font-mono-num px-2.5 py-1 rounded-md bg-stone-100 text-slate-800">
@@ -2026,12 +2018,11 @@ export default function App() {
                   </label>
                 </div>
 
-                {/* Private Coordination Note (Held on Server, Revealed Only Upon Acceptance) */}
                 <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-1.5">
                   <label className="block space-y-1">
                     <span className="text-xs font-semibold text-emerald-950 flex items-center gap-1.5">
                       <Lock className="w-3.5 h-3.5 text-emerald-800" />
-                      Private Coordination Note (Hidden from public card & crawlers)
+                      Private Coordination Note (AES-256-GCM Encrypted at Rest)
                     </span>
                     <input
                       type="text"
@@ -2045,7 +2036,7 @@ export default function App() {
                     />
                   </label>
                   <p className="text-[11px] text-emerald-900">
-                    This note is stored privately in D1 and is only shown to a student after you explicitly click <strong>Accept</strong> on their handshake request.
+                    Encrypted with AES-256-GCM before storage in D1. Decrypted and shown only to a student after you explicitly click <strong>Accept</strong> on their handshake request.
                   </p>
                 </div>
 
@@ -2063,7 +2054,7 @@ export default function App() {
                     className="px-5 py-2.5 rounded-xl bg-[#E04F33] hover:bg-[#c94127] disabled:opacity-50 text-white text-xs font-semibold shadow-xs cursor-pointer"
                   >
                     {isSubmitting
-                      ? 'Publishing...'
+                      ? 'Encrypting & Publishing...'
                       : 'Publish Card & Save Owner Key'}
                   </button>
                 </div>
@@ -2083,7 +2074,7 @@ export default function App() {
                       Authorized Connection Handshakes ({dataMode === 'shared_api' ? 'Shared D1' : 'Demo Sandbox'})
                     </h2>
                     <p className="text-xs text-slate-500">
-                      Authenticated via your browser's capability-token vault. Accepting an incoming request reveals your card's private coordination note to that peer.
+                      Authenticated via your browser's capability-token vault. Accepting an incoming request atomically claims 1 spot and reveals your decrypted coordination note.
                     </p>
                   </div>
                   <KeyRound className="w-5 h-5 text-emerald-700 shrink-0" />
@@ -2139,28 +2130,34 @@ export default function App() {
                           <span className="text-xs text-emerald-900 font-medium">
                             {hs.revealedContactNote}
                           </span>
-                          {hs.direction === 'incoming' && hs.status === 'pending' && (
+                          {hs.direction === 'incoming' && (
                             <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                disabled={isSubmitting}
-                                onClick={() =>
-                                  handleHandshakeDecision(hs, 'declined')
-                                }
-                                className="px-3 py-1.5 rounded-lg bg-stone-200 text-slate-700 text-xs font-semibold cursor-pointer"
-                              >
-                                Decline
-                              </button>
-                              <button
-                                type="button"
-                                disabled={isSubmitting}
-                                onClick={() =>
-                                  handleHandshakeDecision(hs, 'accepted')
-                                }
-                                className="px-3 py-1.5 rounded-lg bg-emerald-700 text-white text-xs font-semibold cursor-pointer"
-                              >
-                                Accept & Reveal Note
-                              </button>
+                              {hs.status !== 'declined' && (
+                                <button
+                                  type="button"
+                                  disabled={isSubmitting}
+                                  onClick={() =>
+                                    handleHandshakeDecision(hs, 'declined')
+                                  }
+                                  className="px-3 py-1.5 rounded-lg bg-stone-200 text-slate-700 text-xs font-semibold cursor-pointer"
+                                >
+                                  {hs.status === 'accepted'
+                                    ? 'Cancel & Restore Spot'
+                                    : 'Decline'}
+                                </button>
+                              )}
+                              {hs.status !== 'accepted' && (
+                                <button
+                                  type="button"
+                                  disabled={isSubmitting}
+                                  onClick={() =>
+                                    handleHandshakeDecision(hs, 'accepted')
+                                  }
+                                  className="px-3 py-1.5 rounded-lg bg-emerald-700 text-white text-xs font-semibold cursor-pointer"
+                                >
+                                  Accept & Reveal Note
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>
@@ -2170,7 +2167,6 @@ export default function App() {
                 )}
               </section>
 
-              {/* Capability Vault & Local Data Controls */}
               <section className="bg-white rounded-2xl border border-[#E6E2DC] p-5 space-y-3">
                 <h3 className="font-display font-bold text-sm text-slate-900">
                   Browser Capability Vault & Local Storage
@@ -2263,7 +2259,7 @@ export default function App() {
               </div>
               <label className="block space-y-1">
                 <span className="text-xs font-semibold text-slate-700">
-                  Short Intro Note (8–280 chars: relevant skill or timing)
+                  Short Intro Note (8–280 chars, no phone numbers/emails)
                 </span>
                 <textarea
                   rows={2}

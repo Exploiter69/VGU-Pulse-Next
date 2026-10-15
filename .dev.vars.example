@@ -4,10 +4,13 @@
 APP_ENV="development"
 PUBLIC_ORIGIN="http://localhost:5173"
 
-# Cloudflare Official Dummy Test Keys (Always Passes in Local Development)
+# Cloudflare Official Dummy Test Keys (Always Passes in Local Development Only)
 # Docs: https://developers.cloudflare.com/turnstile/troubleshooting/testing/
 TURNSTILE_SITE_KEY="1x00000000000000000000AA"
 TURNSTILE_SECRET_KEY="1x0000000000000000000000000000000AA"
 
-# Local Salt used to hash client IP addresses before rate-limit storage
+# Local Salt used to SHA-256 hash client IP addresses for sliding-window rate limiting and report deduplication
 RATE_LIMIT_SALT="local-dev-non-secret-salt-change-in-prod"
+
+# Local 32+ character key used to AES-256-GCM encrypt private coordination notes at rest in D1
+COORDINATION_ENCRYPTION_KEY="dev-only-vgu-pulse-coordination-secret-key-32b!"

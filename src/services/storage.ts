@@ -3,6 +3,12 @@ import { CapabilityVault } from '../types/domain';
 const STORAGE_PREFIX = 'vgu_pulse_next_v1_';
 const VAULT_KEY = 'capability_vault';
 
+function generateBrowserParticipantToken(): string {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 export function loadLocalState<T>(key: string, fallback: T): T {
   try {
     const raw = window.localStorage.getItem(`${STORAGE_PREFIX}${key}`);
@@ -22,10 +28,27 @@ export function saveLocalState<T>(key: string, value: T): void {
 }
 
 export function loadCapabilityVault(): CapabilityVault {
-  return loadLocalState<CapabilityVault>(VAULT_KEY, {
+  const loaded = loadLocalState<CapabilityVault>(VAULT_KEY, {
     ownedCards: {},
     sentHandshakes: {},
   });
+
+  if (!loaded.participantToken || loaded.participantToken.length < 16) {
+    const updated: CapabilityVault = {
+      ownedCards: loaded.ownedCards || {},
+      sentHandshakes: loaded.sentHandshakes || {},
+      participantToken: generateBrowserParticipantToken(),
+    };
+    saveLocalState(VAULT_KEY, updated);
+    return updated;
+  }
+
+  return loaded;
+}
+
+export function getOrCreateParticipantToken(): string {
+  const vault = loadCapabilityVault();
+  return vault.participantToken!;
 }
 
 export function saveCardOwnerToken(cardId: string, rawToken: string): CapabilityVault {

@@ -12,6 +12,7 @@
     {
       "binding": "DB",
       "database_name": "vgu-pulse-db",
+      // DEVELOPMENT PLACEHOLDER UUID ONLY: Replace with real D1 UUID from `npx wrangler d1 create vgu-pulse-db` before deploying to production.
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
