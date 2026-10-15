@@ -1,11 +1,25 @@
 export type NavigationTab = 'home' | 'toolkit' | 'explore' | 'create' | 'connect';
 
+export type DataSourceMode = 'shared_api' | 'local_demo';
+
 export type PulseCategory =
   | 'hackathon'
   | 'study'
   | 'sports'
   | 'cab_pool'
   | 'project';
+
+export type AcademicYear =
+  | '1st Year'
+  | '2nd Year'
+  | '3rd Year'
+  | '4th Year'
+  | 'PG / Research';
+
+export type HandshakeChannel =
+  | 'WhatsApp'
+  | 'Telegram'
+  | 'In-Person Campus Meet';
 
 export interface PulseCard {
   id: string;
@@ -14,14 +28,36 @@ export interface PulseCard {
   description: string;
   authorName: string;
   authorDepartment: string;
-  authorYear: string;
+  authorYear: AcademicYear;
   tags: string[];
   spotsTotal: number;
   spotsRemaining: number;
   timeWindow: string;
   createdAt: string;
+  expiresAt?: string;
+  status?: 'open' | 'filled' | 'expired' | 'removed';
   isDemoFixture: boolean;
-  preferredHandshakeChannel: 'WhatsApp' | 'Telegram' | 'In-Person Campus Meet';
+  preferredHandshakeChannel: HandshakeChannel;
+}
+
+export interface CreatePulseCardInput {
+  title: string;
+  category: PulseCategory;
+  description: string;
+  authorName: string;
+  authorDepartment: string;
+  authorYear: AcademicYear;
+  tags: string[];
+  spotsTotal: number;
+  timeWindow: string;
+  preferredHandshakeChannel: HandshakeChannel;
+  coordinationNote: string;
+  turnstileToken?: string;
+}
+
+export interface CreatePulseCardResponse {
+  card: PulseCard;
+  ownerCapabilityToken: string;
 }
 
 export interface CampusEvent {
@@ -33,7 +69,11 @@ export interface CampusEvent {
   timeLabel: string;
   venue: string;
   registrationUrl?: string;
-  verificationSource: 'Official VGU Link' | 'Club Submitted (Demo)';
+  verificationSource:
+    | 'Official VGU Link'
+    | 'Verified Club Submission'
+    | 'Student Submitted (Unverified)'
+    | 'Club Submitted (Demo)';
   isDemoFixture: boolean;
   goingCount: number;
   lookingForBuddyCount: number;
@@ -65,7 +105,7 @@ export interface HandshakeRequest {
   cardTitle: string;
   fromStudentName: string;
   fromDepartment: string;
-  fromYear: string;
+  fromYear: AcademicYear;
   introNote: string;
   direction: 'incoming' | 'outgoing';
   status: 'pending' | 'accepted' | 'declined';
@@ -74,9 +114,39 @@ export interface HandshakeRequest {
   revealedContactNote?: string;
 }
 
+export interface CreateHandshakeInput {
+  cardId: string;
+  fromStudentName: string;
+  fromDepartment: string;
+  fromYear: AcademicYear;
+  introNote: string;
+  turnstileToken?: string;
+}
+
+export interface CreateHandshakeResponse {
+  handshake: HandshakeRequest;
+  senderCapabilityToken: string;
+}
+
+export interface CapabilityVault {
+  /** Maps cardId -> raw ownerCapabilityToken */
+  ownedCards: Record<string, string>;
+  /** Maps handshakeId -> raw senderCapabilityToken */
+  sentHandshakes: Record<string, string>;
+}
+
 export interface CourseGradeRow {
   id: string;
   name: string;
   credits: number;
   gradeLetter: string;
+}
+
+export interface ApiErrorPayload {
+  ok: false;
+  error: {
+    code: string;
+    message: string;
+    field?: string;
+  };
 }
