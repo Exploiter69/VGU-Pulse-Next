@@ -1,4 +1,7 @@
+import { CapabilityVault } from '../types/domain';
+
 const STORAGE_PREFIX = 'vgu_pulse_next_v1_';
+const VAULT_KEY = 'capability_vault';
 
 export function loadLocalState<T>(key: string, fallback: T): T {
   try {
@@ -16,6 +19,36 @@ export function saveLocalState<T>(key: string, value: T): void {
   } catch {
     // Graceful no-op if storage quota or private mode blocks write
   }
+}
+
+export function loadCapabilityVault(): CapabilityVault {
+  return loadLocalState<CapabilityVault>(VAULT_KEY, {
+    ownedCards: {},
+    sentHandshakes: {},
+  });
+}
+
+export function saveCardOwnerToken(cardId: string, rawToken: string): CapabilityVault {
+  const vault = loadCapabilityVault();
+  const updated: CapabilityVault = {
+    ...vault,
+    ownedCards: { ...vault.ownedCards, [cardId]: rawToken },
+  };
+  saveLocalState(VAULT_KEY, updated);
+  return updated;
+}
+
+export function saveHandshakeSenderToken(
+  handshakeId: string,
+  rawToken: string
+): CapabilityVault {
+  const vault = loadCapabilityVault();
+  const updated: CapabilityVault = {
+    ...vault,
+    sentHandshakes: { ...vault.sentHandshakes, [handshakeId]: rawToken },
+  };
+  saveLocalState(VAULT_KEY, updated);
+  return updated;
 }
 
 export function clearAllLocalPulseData(): void {
