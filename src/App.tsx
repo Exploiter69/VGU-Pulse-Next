@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Calculator,
   Compass,
@@ -18,10 +18,17 @@ import {
   Search,
   Flag,
   BookOpen,
+  RefreshCw,
+  Database,
+  KeyRound,
 } from 'lucide-react';
 import {
+  AcademicYear,
   CampusEvent,
+  CapabilityVault,
   CourseGradeRow,
+  DataSourceMode,
+  HandshakeChannel,
   HandshakeRequest,
   NavigationTab,
   PlannerTask,
@@ -44,9 +51,23 @@ import {
 } from './data/demoFixtures';
 import {
   clearAllLocalPulseData,
+  loadCapabilityVault,
   loadLocalState,
+  saveCardOwnerToken,
+  saveHandshakeSenderToken,
   saveLocalState,
 } from './services/storage';
+import {
+  ApiClientError,
+  createSharedCard,
+  createSharedHandshake,
+  decideSharedHandshake,
+  fetchSharedCards,
+  fetchSharedEvents,
+  fetchSynchronizedHandshakes,
+  reportSharedCard,
+  toggleSharedEventBuddy,
+} from './services/apiClient';
 
 const CATEGORY_META: Record<
   PulseCategory,
@@ -78,7 +99,19 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('home');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // --- Toolkit State (Local-First Persistence) ---
+  // Explicit Data Source Mode: 'shared_api' (Cloudflare Worker + D1) vs 'local_demo' (Stage 1 Sandbox Fixtures)
+  // Never silently mixes demo fixtures with live shared database rows.
+  const [dataMode, setDataMode] = useState<DataSourceMode>(() =>
+    loadLocalState<DataSourceMode>('data_mode', 'shared_api')
+  );
+  const [apiLoading, setApiLoading] = useState<boolean>(false);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+
+  // Deep-link URL inspection (/cards/:id or /events/:id or ?card= / ?event=)
+  const [deepLinkNotice, setDeepLinkNotice] = useState<string | null>(null);
+
+  // --- Toolkit State (Always 100% Local-First & Offline Capable) ---
   const [attended, setAttended] = useState<number>(() =>
     loadLocalState('att_attended', 29)
   );
@@ -113,13 +146,23 @@ export default function App() {
   const [newTaskCourse, setNewTaskCourse] = useState('');
   const [newTaskDate, setNewTaskDate] = useState('2026-10-28');
 
-  // --- Explore & Pulse Board State ---
-  const [pulseCards, setPulseCards] = useState<PulseCard[]>(() =>
-    loadLocalState('pulse_cards', DEMO_PULSE_CARDS)
+  // --- Shared D1 State vs Local Demo State ---
+  const [sharedCards, setSharedCards] = useState<PulseCard[]>([]);
+  const [sharedEvents, setSharedEvents] = useState<CampusEvent[]>([]);
+  const [sharedHandshakes, setSharedHandshakes] = useState<HandshakeRequest[]>([]);
+
+  const [demoCards, setDemoCards] = useState<PulseCard[]>(() =>
+    loadLocalState('demo_pulse_cards', DEMO_PULSE_CARDS)
   );
-  const [events, setEvents] = useState<CampusEvent[]>(() =>
-    loadLocalState('campus_events', DEMO_CAMPUS_EVENTS)
+  const [demoEvents, setDemoEvents] = useState<CampusEvent[]>(() =>
+    loadLocalState('demo_campus_events', DEMO_CAMPUS_EVENTS)
   );
+  const [demoHandshakes, setDemoHandshakes] = useState<HandshakeRequest[]>(() =>
+    loadLocalState('demo_handshakes', DEMO_HANDSHAKE_REQUESTS)
+  );
+
+  const [vault, setVault] = useState<CapabilityVault>(() => loadCapabilityVault());
+
   const [selectedCategory, setSelectedCategory] = useState<PulseCategory | 'all'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [exploreSubTab, setExploreSubTab] = useState<'requests' | 'events'>('requests');
@@ -130,14 +173,11 @@ export default function App() {
     loadLocalState('reported_ids', [])
   );
 
-  // --- Connect / Handshake State ---
-  const [handshakes, setHandshakes] = useState<HandshakeRequest[]>(() =>
-    loadLocalState('handshakes', DEMO_HANDSHAKE_REQUESTS)
-  );
+  // --- Connect / Handshake Modal State ---
   const [activeJoinCard, setActiveJoinCard] = useState<PulseCard | null>(null);
   const [joinName, setJoinName] = useState('');
   const [joinDept, setJoinDept] = useState('B.Tech CSE');
-  const [joinYear, setJoinYear] = useState('2nd Year');
+  const [joinYear, setJoinYear] = useState<AcademicYear>('2nd Year');
   const [joinNote, setJoinNote] = useState('');
 
   // --- Create Request Form State ---
@@ -146,15 +186,18 @@ export default function App() {
   const [createDesc, setCreateDesc] = useState('');
   const [createAuthor, setCreateAuthor] = useState('');
   const [createDept, setCreateDept] = useState('B.Tech CSE');
-  const [createYear, setCreateYear] = useState('2nd Year');
+  const [createYear, setCreateYear] = useState<AcademicYear>('2nd Year');
   const [createTags, setCreateTags] = useState('React, TypeScript, SIH');
   const [createSpots, setCreateSpots] = useState(2);
   const [createWindow, setCreateWindow] = useState('This Weekend');
-  const [createChannel, setCreateChannel] =
-    useState<PulseCard['preferredHandshakeChannel']>('WhatsApp');
+  const [createChannel, setCreateChannel] = useState<HandshakeChannel>('WhatsApp');
+  const [createCoordinationNote, setCreateCoordinationNote] = useState(
+    'Meet at Central Library 2nd floor reading table at 3:15 PM'
+  );
   const [createError, setCreateError] = useState<string | null>(null);
 
-  // Sync to localStorage
+  // Sync local-first settings to localStorage
+  useEffect(() => saveLocalState('data_mode', dataMode), [dataMode]);
   useEffect(() => saveLocalState('att_attended', attended), [attended]);
   useEffect(() => saveLocalState('att_total', totalHeld), [totalHeld]);
   useEffect(() => saveLocalState('att_threshold', targetThreshold), [targetThreshold]);
@@ -162,16 +205,72 @@ export default function App() {
   useEffect(() => saveLocalState('prior_cgpa', priorCgpa), [priorCgpa]);
   useEffect(() => saveLocalState('prior_credits', priorCredits), [priorCredits]);
   useEffect(() => saveLocalState('planner_tasks', tasks), [tasks]);
-  useEffect(() => saveLocalState('pulse_cards', pulseCards), [pulseCards]);
-  useEffect(() => saveLocalState('campus_events', events), [events]);
+  useEffect(() => saveLocalState('demo_pulse_cards', demoCards), [demoCards]);
+  useEffect(() => saveLocalState('demo_campus_events', demoEvents), [demoEvents]);
+  useEffect(() => saveLocalState('demo_handshakes', demoHandshakes), [demoHandshakes]);
   useEffect(() => saveLocalState('buddy_rsvps', buddyRsvpIds), [buddyRsvpIds]);
   useEffect(() => saveLocalState('reported_ids', reportedIds), [reportedIds]);
-  useEffect(() => saveLocalState('handshakes', handshakes), [handshakes]);
 
   const triggerToast = (msg: string) => {
     setToastMessage(msg);
-    window.setTimeout(() => setToastMessage(null), 3500);
+    window.setTimeout(() => setToastMessage(null), 4000);
   };
+
+  // Load Shared Data from Cloudflare Worker D1 API
+  const refreshSharedData = useCallback(async () => {
+    if (dataMode !== 'shared_api') return;
+    setApiLoading(true);
+    setApiError(null);
+    try {
+      const currentVault = loadCapabilityVault();
+      const [cardsRes, eventsRes, handshakesRes] = await Promise.all([
+        fetchSharedCards(),
+        fetchSharedEvents(),
+        fetchSynchronizedHandshakes(currentVault),
+      ]);
+      setSharedCards(cardsRes);
+      setSharedEvents(eventsRes);
+      setSharedHandshakes(handshakesRes);
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Could not reach the local/shared Worker API.';
+      setApiError(msg);
+    } finally {
+      setApiLoading(false);
+    }
+  }, [dataMode]);
+
+  useEffect(() => {
+    refreshSharedData();
+  }, [refreshSharedData]);
+
+  // Handle incoming share URLs (/cards/:id, /events/:id, ?card=, ?event=)
+  useEffect(() => {
+    const path = window.location.pathname;
+    const params = new URLSearchParams(window.location.search);
+    const cardMatch = path.match(/^\/cards\/([^/]+)/);
+    const eventMatch = path.match(/^\/events\/([^/]+)/);
+    const targetCard = cardMatch ? decodeURIComponent(cardMatch[1]) : params.get('card');
+    const targetEvent = eventMatch ? decodeURIComponent(eventMatch[1]) : params.get('event');
+
+    if (targetCard) {
+      setActiveTab('explore');
+      setExploreSubTab('requests');
+      setDeepLinkNotice(`Opened shared link for Pulse Card ID: ${targetCard}`);
+    } else if (targetEvent) {
+      setActiveTab('explore');
+      setExploreSubTab('events');
+      setDeepLinkNotice(`Opened shared link for Campus Event ID: ${targetEvent}`);
+    }
+  }, []);
+
+  // Select active datasets based on explicit mode (Never mixed silently)
+  const activeCards = dataMode === 'shared_api' ? sharedCards : demoCards;
+  const activeEvents = dataMode === 'shared_api' ? sharedEvents : demoEvents;
+  const activeHandshakes =
+    dataMode === 'shared_api' ? sharedHandshakes : demoHandshakes;
 
   // Calculations
   const attendanceResult = useMemo(
@@ -198,9 +297,11 @@ export default function App() {
   );
 
   const filteredCards = useMemo(() => {
-    return pulseCards
+    return activeCards
       .filter((c) => !reportedIds.includes(c.id))
-      .filter((c) => (selectedCategory === 'all' ? true : c.category === selectedCategory))
+      .filter((c) =>
+        selectedCategory === 'all' ? true : c.category === selectedCategory
+      )
       .filter((c) => {
         if (!searchQuery.trim()) return true;
         const q = searchQuery.toLowerCase();
@@ -211,9 +312,9 @@ export default function App() {
           c.tags.some((t) => t.toLowerCase().includes(q))
         );
       });
-  }, [pulseCards, reportedIds, selectedCategory, searchQuery]);
+  }, [activeCards, reportedIds, selectedCategory, searchQuery]);
 
-  // Share Handler with Web Share API + Clipboard + WhatsApp Fallback
+  // Share Handlers
   const handleShareCard = async (card: PulseCard, directWhatsApp = false) => {
     const payload = buildCardSharePayload(card, window.location.origin);
     if (directWhatsApp) {
@@ -234,7 +335,7 @@ export default function App() {
     }
     try {
       await navigator.clipboard.writeText(payload.text);
-      triggerToast('Share text & link copied! Ready to paste in WhatsApp.');
+      triggerToast('Share text & /cards/:id link copied! Ready to paste in WhatsApp.');
     } catch {
       window.open(payload.whatsappUrl, '_blank', 'noopener,noreferrer');
     }
@@ -248,80 +349,153 @@ export default function App() {
     }
     try {
       await navigator.clipboard.writeText(payload.text);
-      triggerToast('Event invite copied to clipboard!');
+      triggerToast('Event /events/:id invite copied to clipboard!');
     } catch {
       window.open(payload.whatsappUrl, '_blank', 'noopener,noreferrer');
     }
   };
 
-  const handleCreateCardSubmit = (e: React.FormEvent) => {
+  // Create Card Submission (Server-Confirmed in shared_api mode)
+  const handleCreateCardSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setCreateError(null);
 
-    const cleanTitle = createTitle.trim();
-    const cleanDesc = createDesc.trim();
-    const cleanAuthor = createAuthor.trim();
+    const parsedTags = createTags
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .slice(0, 5);
 
-    if (cleanTitle.length < 10) {
-      setCreateError('Give your request a specific title (at least 10 characters).');
+    if (dataMode === 'shared_api') {
+      setIsSubmitting(true);
+      try {
+        const res = await createSharedCard({
+          title: createTitle,
+          category: createCategory,
+          description: createDesc,
+          authorName: createAuthor,
+          authorDepartment: createDept,
+          authorYear: createYear,
+          tags: parsedTags,
+          spotsTotal: Number(createSpots) || 2,
+          timeWindow: createWindow,
+          preferredHandshakeChannel: createChannel,
+          coordinationNote: createCoordinationNote,
+          turnstileToken: 'LOCAL_DEV_TURNSTILE_BYPASS',
+        });
+
+        const updatedVault = saveCardOwnerToken(
+          res.card.id,
+          res.ownerCapabilityToken
+        );
+        setVault(updatedVault);
+        setSharedCards((prev) => [res.card, ...prev]);
+        setCreateTitle('');
+        setCreateDesc('');
+        setActiveTab('explore');
+        setExploreSubTab('requests');
+        triggerToast(
+          'Published to shared D1 database! Owner capability key saved in your browser.'
+        );
+      } catch (err) {
+        if (err instanceof ApiClientError) {
+          setCreateError(err.message);
+        } else {
+          setCreateError('Failed to publish card to server. Check connection.');
+        }
+      } finally {
+        setIsSubmitting(false);
+      }
       return;
     }
-    if (cleanDesc.length < 15) {
-      setCreateError('Add a short description (at least 15 characters) so peers know what you need.');
-      return;
-    }
-    if (!cleanAuthor) {
-      setCreateError('Please enter your first name or display name.');
-      return;
-    }
-    // Safety guard: reject raw 10-digit Indian mobile numbers in public card text
+
+    // Local Demo Sandbox Mode
     const phoneRegex = /\b[6-9]\d{9}\b/;
-    if (phoneRegex.test(cleanTitle) || phoneRegex.test(cleanDesc)) {
+    if (phoneRegex.test(createTitle) || phoneRegex.test(createDesc)) {
       setCreateError(
-        'Privacy Protection: Do not paste your phone number in public cards. Contacts are shared only after you accept a request.'
+        'Privacy Protection: Do not paste your phone number in public cards. Put meeting/contact instructions in the private Coordination Note.'
       );
       return;
     }
+    if (createTitle.trim().length < 10 || createDesc.trim().length < 15) {
+      setCreateError('Please enter a title (10+ chars) and description (15+ chars).');
+      return;
+    }
 
-    const newCard: PulseCard = {
-      id: `local-card-${Date.now()}`,
-      title: cleanTitle,
+    const newDemoCard: PulseCard = {
+      id: `demo-local-${Date.now()}`,
+      title: createTitle.trim(),
       category: createCategory,
-      description: cleanDesc,
-      authorName: cleanAuthor,
+      description: createDesc.trim(),
+      authorName: createAuthor.trim() || 'Demo Student',
       authorDepartment: createDept,
       authorYear: createYear,
-      tags: createTags
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean)
-        .slice(0, 4),
-      spotsTotal: Math.max(1, Math.min(10, Number(createSpots) || 2)),
-      spotsRemaining: Math.max(1, Math.min(10, Number(createSpots) || 2)),
+      tags: parsedTags,
+      spotsTotal: Math.max(1, Math.min(20, Number(createSpots) || 2)),
+      spotsRemaining: Math.max(1, Math.min(20, Number(createSpots) || 2)),
       timeWindow: createWindow.trim() || 'Flexible this week',
-      createdAt: 'Just now (Your Local Card)',
-      isDemoFixture: false,
+      createdAt: 'Just now (Local Demo Sandbox)',
+      isDemoFixture: true,
       preferredHandshakeChannel: createChannel,
     };
 
-    setPulseCards((prev) => [newCard, ...prev]);
+    setDemoCards((prev) => [newDemoCard, ...prev]);
     setCreateTitle('');
     setCreateDesc('');
     setActiveTab('explore');
     setExploreSubTab('requests');
-    triggerToast('Pulse Request created! Tap "WhatsApp" on your card to share it.');
+    triggerToast('Created in Local Demo Sandbox.');
   };
 
-  const handleSendHandshake = (e: React.FormEvent) => {
+  // Send Handshake Request
+  const handleSendHandshake = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeJoinCard) return;
+
+    if (dataMode === 'shared_api') {
+      setIsSubmitting(true);
+      try {
+        const res = await createSharedHandshake({
+          cardId: activeJoinCard.id,
+          fromStudentName: joinName,
+          fromDepartment: joinDept,
+          fromYear: joinYear,
+          introNote: joinNote,
+          turnstileToken: 'LOCAL_DEV_TURNSTILE_BYPASS',
+        });
+
+        const updatedVault = saveHandshakeSenderToken(
+          res.handshake.id,
+          res.senderCapabilityToken
+        );
+        setVault(updatedVault);
+        setSharedHandshakes((prev) => [res.handshake, ...prev]);
+        setActiveJoinCard(null);
+        setJoinNote('');
+        setActiveTab('connect');
+        triggerToast(
+          'Handshake stored in D1! Check your Connect tab when the card owner responds.'
+        );
+      } catch (err) {
+        triggerToast(
+          err instanceof ApiClientError
+            ? err.message
+            : 'Could not submit handshake request.'
+        );
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
+    // Local Demo Mode
     if (!joinName.trim() || joinNote.trim().length < 8) {
-      triggerToast('Please enter your name and a short intro note.');
+      triggerToast('Please enter your name and an intro note (8+ chars).');
       return;
     }
 
     const req: HandshakeRequest = {
-      id: `hs-${Date.now()}`,
+      id: `hs-demo-${Date.now()}`,
       cardId: activeJoinCard.id,
       cardTitle: activeJoinCard.title,
       fromStudentName: joinName.trim(),
@@ -330,24 +504,102 @@ export default function App() {
       introNote: joinNote.trim(),
       direction: 'outgoing',
       status: 'pending',
-      createdAtLabel: 'Just now',
-      isDemoFixture: false,
-      revealedContactNote: `Waiting for ${activeJoinCard.authorName} to accept via ${activeJoinCard.preferredHandshakeChannel}.`,
+      createdAtLabel: 'Just now (Demo)',
+      isDemoFixture: true,
+      revealedContactNote: `Demo Mode: Waiting for ${activeJoinCard.authorName} to accept.`,
     };
 
-    setHandshakes((prev) => [req, ...prev]);
+    setDemoHandshakes((prev) => [req, ...prev]);
     setActiveJoinCard(null);
     setJoinNote('');
     setActiveTab('connect');
-    triggerToast('Connection request queued in your Connect tab!');
+    triggerToast('Demo handshake queued in Connect tab.');
   };
 
-  const handleToggleEventBuddy = (eventId: string) => {
+  // Accept / Decline Handshake
+  const handleHandshakeDecision = async (
+    hs: HandshakeRequest,
+    decision: 'accepted' | 'declined'
+  ) => {
+    if (dataMode === 'shared_api') {
+      const ownerToken = vault.ownedCards[hs.cardId];
+      if (!ownerToken) {
+        triggerToast(
+          'Missing card-owner capability token in this browser for this card.'
+        );
+        return;
+      }
+      setIsSubmitting(true);
+      try {
+        const updated = await decideSharedHandshake(hs.id, decision, ownerToken);
+        setSharedHandshakes((prev) =>
+          prev.map((item) => (item.id === hs.id ? updated : item))
+        );
+        await refreshSharedData();
+        triggerToast(
+          decision === 'accepted'
+            ? 'Handshake accepted! Your private coordination note is now visible to this requester.'
+            : 'Handshake declined.'
+        );
+      } catch (err) {
+        triggerToast(
+          err instanceof ApiClientError
+            ? err.message
+            : 'Failed to update handshake status.'
+        );
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
+    // Local Demo Mode
+    setDemoHandshakes((prev) =>
+      prev.map((item) =>
+        item.id === hs.id
+          ? {
+              ...item,
+              status: decision,
+              revealedContactNote:
+                decision === 'accepted'
+                  ? '✓ Demo Accepted: In Shared Mode, the owner coordination note is revealed here.'
+                  : 'Request declined.',
+            }
+          : item
+      )
+    );
+    triggerToast(`Demo handshake ${decision}.`);
+  };
+
+  // Event Buddy Toggle
+  const handleToggleEventBuddy = async (eventId: string) => {
     const alreadyIn = buddyRsvpIds.includes(eventId);
+    const direction = alreadyIn ? 'leave' : 'join';
+
+    if (dataMode === 'shared_api') {
+      try {
+        const updated = await toggleSharedEventBuddy(eventId, direction);
+        setSharedEvents((prev) =>
+          prev.map((ev) => (ev.id === eventId ? updated : ev))
+        );
+        setBuddyRsvpIds((prev) =>
+          alreadyIn ? prev.filter((id) => id !== eventId) : [...prev, eventId]
+        );
+        triggerToast(
+          alreadyIn
+            ? 'Removed from event buddy count.'
+            : 'Updated shared event buddy count!'
+        );
+      } catch {
+        triggerToast('Could not update event buddy count on server.');
+      }
+      return;
+    }
+
     setBuddyRsvpIds((prev) =>
       alreadyIn ? prev.filter((id) => id !== eventId) : [...prev, eventId]
     );
-    setEvents((prev) =>
+    setDemoEvents((prev) =>
       prev.map((ev) =>
         ev.id === eventId
           ? {
@@ -360,11 +612,22 @@ export default function App() {
           : ev
       )
     );
-    triggerToast(
-      alreadyIn
-        ? 'Removed from event buddy list.'
-        : 'Marked as "Going & open to attending with a peer"!'
-    );
+    triggerToast('Updated demo event buddy count.');
+  };
+
+  // Report Card
+  const handleReportCard = async (card: PulseCard) => {
+    setReportedIds((prev) => [...prev, card.id]);
+    if (dataMode === 'shared_api' && !card.isDemoFixture) {
+      try {
+        await reportSharedCard(card.id);
+        triggerToast('Card reported to server & hidden from your view.');
+        return;
+      } catch {
+        // Still hidden locally
+      }
+    }
+    triggerToast('Card hidden from your view.');
   };
 
   return (
@@ -395,9 +658,10 @@ export default function App() {
                 { id: 'create', label: 'Post a Request', icon: PlusCircle },
                 {
                   id: 'connect',
-                  label: 'Handshakes & Privacy',
+                  label: 'Handshakes & Keys',
                   icon: Users,
-                  badge: handshakes.filter((h) => h.status === 'pending').length,
+                  badge: activeHandshakes.filter((h) => h.status === 'pending')
+                    .length,
                 },
               ] as const
             ).map((item) => {
@@ -434,21 +698,62 @@ export default function App() {
           </nav>
         </div>
 
-        <div className="p-3.5 rounded-xl bg-stone-100/80 border border-[#E6E2DC] text-xs text-slate-600 space-y-1.5">
-          <div className="flex items-center gap-1.5 font-semibold text-slate-800">
-            <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
-            <span>Zero-Login Privacy</span>
+        {/* Explicit Data Mode Switcher (Never Silently Mixes Demo & Shared D1) */}
+        <div className="space-y-3">
+          <div className="p-3.5 rounded-xl bg-[#FAF8F5] border border-[#E6E2DC] text-xs space-y-2">
+            <div className="flex items-center justify-between font-semibold text-slate-800">
+              <span className="flex items-center gap-1.5">
+                <Database className="w-3.5 h-3.5 text-[#E04F33]" />
+                Data Source Mode
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-1 p-1 bg-stone-200/70 rounded-lg">
+              <button
+                type="button"
+                onClick={() => setDataMode('shared_api')}
+                className={`py-1 px-2 rounded text-[11px] font-semibold transition cursor-pointer ${
+                  dataMode === 'shared_api'
+                    ? 'bg-[#0F172A] text-white'
+                    : 'text-slate-700 hover:text-slate-900'
+                }`}
+              >
+                Shared D1 API
+              </button>
+              <button
+                type="button"
+                onClick={() => setDataMode('local_demo')}
+                className={`py-1 px-2 rounded text-[11px] font-semibold transition cursor-pointer ${
+                  dataMode === 'local_demo'
+                    ? 'bg-amber-600 text-white'
+                    : 'text-slate-700 hover:text-slate-900'
+                }`}
+              >
+                Demo Sandbox
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              {dataMode === 'shared_api'
+                ? 'Showing live records from Cloudflare Worker + D1. Demo fixtures are hidden.'
+                : 'Showing offline sample fixtures. Calculators always stay local.'}
+            </p>
           </div>
-          <p className="leading-relaxed">
-            Your calculator & planner data lives locally on your device. Demo cards are clearly badged.
-          </p>
+
+          <div className="p-3.5 rounded-xl bg-stone-100/80 border border-[#E6E2DC] text-xs text-slate-600 space-y-1">
+            <div className="flex items-center gap-1.5 font-semibold text-slate-800">
+              <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
+              <span>Capability-Token Privacy</span>
+            </div>
+            <p className="leading-relaxed text-[11px]">
+              No account required. Card ownership & handshakes use hashed capability keys stored in your browser.
+            </p>
+          </div>
         </div>
       </aside>
 
       {/* Main Content Container */}
       <div className="flex-1 md:pl-64 pb-24 md:pb-12">
-        {/* Top Mobile Header */}
-        <header className="sticky top-0 z-20 bg-[#FAF8F5]/90 backdrop-blur-md border-b border-[#E6E2DC] px-4 py-3 flex items-center justify-between md:px-8">
+        {/* Top Header */}
+        <header className="sticky top-0 z-20 bg-[#FAF8F5]/90 backdrop-blur-md border-b border-[#E6E2DC] px-4 py-3 flex flex-wrap items-center justify-between gap-2 md:px-8">
           <div className="flex items-center gap-2.5">
             <div className="md:hidden w-8 h-8 rounded-lg bg-[#0F172A] text-white flex items-center justify-center font-display font-bold text-sm">
               VP
@@ -459,21 +764,100 @@ export default function App() {
                 {activeTab === 'toolkit' && 'Academic Survival Toolkit'}
                 {activeTab === 'explore' && 'Pulse Board & Campus Events'}
                 {activeTab === 'create' && 'Create a Structured Request'}
-                {activeTab === 'connect' && 'Connection Handshakes & Data'}
+                {activeTab === 'connect' && 'Connection Handshakes & Keys'}
               </h1>
               <p className="text-xs text-slate-500 hidden sm:block">
-                Independent student utility for VGU Jaipur • Local-first & browser-ready
+                Independent student utility for VGU Jaipur • Browser-first & local-first
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-amber-100/90 text-amber-900 border border-amber-300/80">
-              <Sparkles className="w-3 h-3 text-amber-700" />
-              Stage 1 Prototype (Demo Data Labelled)
-            </span>
+            {dataMode === 'shared_api' ? (
+              <button
+                type="button"
+                onClick={refreshSharedData}
+                disabled={apiLoading}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-900 border border-emerald-300 cursor-pointer"
+              >
+                <RefreshCw
+                  className={`w-3 h-3 ${apiLoading ? 'animate-spin' : ''}`}
+                />
+                {apiLoading ? 'Syncing D1...' : 'Shared D1 Live'}
+              </button>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-100 text-amber-900 border border-amber-300">
+                <Sparkles className="w-3 h-3 text-amber-700" />
+                Local Demo Fixtures
+              </span>
+            )}
+
+            <button
+              type="button"
+              onClick={() =>
+                setDataMode((m) =>
+                  m === 'shared_api' ? 'local_demo' : 'shared_api'
+                )
+              }
+              className="md:hidden text-[11px] underline text-slate-600 font-medium"
+            >
+              Switch to {dataMode === 'shared_api' ? 'Demo' : 'Live D1'}
+            </button>
           </div>
         </header>
+
+        {/* Deep-Link Banner */}
+        {deepLinkNotice && (
+          <div className="max-w-4xl mx-auto px-4 pt-3 md:px-8">
+            <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-950 flex items-center justify-between">
+              <span>🔗 {deepLinkNotice}</span>
+              <button
+                onClick={() => {
+                  setDeepLinkNotice(null);
+                  window.history.replaceState({}, '', '/');
+                }}
+                className="font-semibold underline ml-3"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* API Connection Error Banner (when in Shared D1 Mode) */}
+        {dataMode === 'shared_api' && apiError && (
+          <div className="max-w-4xl mx-auto px-4 pt-3 md:px-8">
+            <div
+              role="alert"
+              className="p-4 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+            >
+              <div>
+                <strong className="font-semibold block">
+                  Shared D1 API Unreachable or Unmigrated ({apiError})
+                </strong>
+                <span>
+                  Run <code className="font-mono-num bg-amber-100 px-1 rounded">npm run db:migrate:local</code> in your terminal, or switch to Demo Sandbox to inspect sample fixtures.
+                </span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={refreshSharedData}
+                  className="px-3 py-1.5 rounded-lg bg-[#0F172A] text-white font-semibold cursor-pointer"
+                >
+                  Retry API
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDataMode('local_demo')}
+                  className="px-3 py-1.5 rounded-lg bg-amber-200 text-amber-950 font-semibold cursor-pointer"
+                >
+                  Use Demo Sandbox
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Toast Notification */}
         {toastMessage && (
@@ -581,7 +965,9 @@ export default function App() {
                     onClick={() => setActiveTab('explore')}
                     className="p-3 rounded-xl bg-[#FAF8F5] hover:bg-stone-100 border border-[#E6E2DC] transition text-left cursor-pointer"
                   >
-                    <span className="text-[11px] text-slate-500 block">Active Cards</span>
+                    <span className="text-[11px] text-slate-500 block">
+                      {dataMode === 'shared_api' ? 'Shared D1 Cards' : 'Demo Cards'}
+                    </span>
                     <span className="text-lg font-bold font-mono-num text-[#E04F33]">
                       {filteredCards.length}
                     </span>
@@ -594,7 +980,9 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <div>
                     <h2 className="font-display font-bold text-base text-slate-900">
-                      Live Student Collaboration Cards
+                      {dataMode === 'shared_api'
+                        ? 'Shared Campus Collaboration Cards (D1)'
+                        : 'Sample Collaboration Cards (Demo Sandbox)'}
                     </h2>
                     <p className="text-xs text-slate-500">
                       Find teammates, study partners, or split a cab to Jaipur Junction
@@ -608,58 +996,85 @@ export default function App() {
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                  {filteredCards.slice(0, 2).map((card) => (
-                    <div
-                      key={card.id}
-                      className="bg-white rounded-2xl border border-[#E6E2DC] p-4 flex flex-col justify-between space-y-3"
-                    >
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <span
-                            className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full border ${CATEGORY_META[card.category].badgeClass}`}
-                          >
-                            {CATEGORY_META[card.category].label}
-                          </span>
-                          {card.isDemoFixture && (
-                            <span className="text-[10px] font-mono-num uppercase bg-stone-100 text-slate-600 px-2 py-0.5 rounded">
-                              Demo Fixture
-                            </span>
-                          )}
-                        </div>
-                        <h3 className="font-display font-bold text-sm text-slate-900 leading-snug">
-                          {card.title}
-                        </h3>
-                        <p className="text-xs text-slate-600 line-clamp-2">
-                          {card.description}
-                        </p>
-                      </div>
-
-                      <div className="pt-2 border-t border-stone-100 flex items-center justify-between text-xs">
-                        <span className="text-slate-500">
-                          {card.authorName} •{' '}
-                          <strong className="text-slate-800 font-mono-num">
-                            {card.spotsRemaining} spot left
-                          </strong>
-                        </span>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            onClick={() => handleShareCard(card, true)}
-                            className="px-2.5 py-1 rounded-lg bg-stone-100 hover:bg-stone-200 text-slate-700 font-medium cursor-pointer"
-                          >
-                            WhatsApp
-                          </button>
-                          <button
-                            onClick={() => setActiveJoinCard(card)}
-                            className="px-2.5 py-1 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white font-medium cursor-pointer"
-                          >
-                            Connect
-                          </button>
-                        </div>
-                      </div>
+                {filteredCards.length === 0 ? (
+                  <div className="bg-white rounded-2xl border border-[#E6E2DC] p-6 text-center space-y-2">
+                    <p className="font-display font-bold text-sm text-slate-800">
+                      {dataMode === 'shared_api'
+                        ? 'No shared student request cards in D1 yet'
+                        : 'No matching demo cards'}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Production D1 starts clean with zero fabricated student requests. Post the first real request card or switch to Demo Sandbox to preview fixtures.
+                    </p>
+                    <div className="pt-2 flex justify-center gap-2">
+                      <button
+                        onClick={() => setActiveTab('create')}
+                        className="px-3.5 py-2 rounded-xl bg-[#E04F33] text-white text-xs font-semibold cursor-pointer"
+                      >
+                        + Post First Request Card
+                      </button>
                     </div>
-                  ))}
-                </div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                    {filteredCards.slice(0, 2).map((card) => (
+                      <div
+                        key={card.id}
+                        className="bg-white rounded-2xl border border-[#E6E2DC] p-4 flex flex-col justify-between space-y-3"
+                      >
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span
+                              className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full border ${
+                                CATEGORY_META[card.category].badgeClass
+                              }`}
+                            >
+                              {CATEGORY_META[card.category].label}
+                            </span>
+                            {card.isDemoFixture ? (
+                              <span className="text-[10px] font-mono-num uppercase bg-stone-100 text-slate-600 px-2 py-0.5 rounded">
+                                Demo Fixture
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-mono-num uppercase bg-emerald-50 text-emerald-800 px-2 py-0.5 rounded">
+                                Shared D1
+                              </span>
+                            )}
+                          </div>
+                          <h3 className="font-display font-bold text-sm text-slate-900 leading-snug">
+                            {card.title}
+                          </h3>
+                          <p className="text-xs text-slate-600 line-clamp-2">
+                            {card.description}
+                          </p>
+                        </div>
+
+                        <div className="pt-2 border-t border-stone-100 flex items-center justify-between text-xs">
+                          <span className="text-slate-500">
+                            {card.authorName} •{' '}
+                            <strong className="text-slate-800 font-mono-num">
+                              {card.spotsRemaining} spot left
+                            </strong>
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => handleShareCard(card, true)}
+                              className="px-2.5 py-1 rounded-lg bg-stone-100 hover:bg-stone-200 text-slate-700 font-medium cursor-pointer"
+                            >
+                              WhatsApp
+                            </button>
+                            <button
+                              onClick={() => setActiveJoinCard(card)}
+                              className="px-2.5 py-1 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white font-medium cursor-pointer"
+                            >
+                              Connect
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </section>
 
               {/* Verified Quick Portals Directory */}
@@ -705,7 +1120,7 @@ export default function App() {
           )}
 
           {/* =========================================================
-              TAB 2: STUDENT TOOLKIT
+              TAB 2: STUDENT TOOLKIT (100% LOCAL-FIRST)
              ========================================================= */}
           {activeTab === 'toolkit' && (
             <div className="space-y-6">
@@ -772,7 +1187,7 @@ export default function App() {
                       <option value={75}>75% (Standard UGC / B.Tech)</option>
                       <option value={80}>80% (Strict / Law / Clinical)</option>
                       <option value={70}>70% (With Medical Relaxation)</option>
-                      <option value={65}>65% (Custom Scholarship Buffer)</option>
+                      <option value={65}>65% (Custom Buffer)</option>
                     </select>
                   </label>
                 </div>
@@ -992,7 +1407,7 @@ export default function App() {
                     3. Personal Semester Deadline & Exam Tracker
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Saved privately in your browser storage—works offline without an account.
+                    Saved privately in your browser storage—never depends on the backend being online.
                   </p>
                 </div>
 
@@ -1123,7 +1538,7 @@ export default function App() {
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    Campus Events & Clubs ({events.length})
+                    Campus Events & Milestones ({activeEvents.length})
                   </button>
                 </div>
 
@@ -1161,6 +1576,7 @@ export default function App() {
                           { id: 'study', label: 'Study Partners' },
                           { id: 'cab_pool', label: 'Cab / Station Split' },
                           { id: 'sports', label: 'Sports & Court' },
+                          { id: 'project', label: 'Semester Projects' },
                         ] as const
                       ).map((cat) => (
                         <button
@@ -1182,131 +1598,156 @@ export default function App() {
                   {filteredCards.length === 0 ? (
                     <div className="bg-white rounded-2xl border border-[#E6E2DC] p-8 text-center space-y-3">
                       <p className="font-display font-bold text-base text-slate-800">
-                        No matching Pulse cards right now
+                        {dataMode === 'shared_api'
+                          ? 'No shared cards match your filter in D1'
+                          : 'No demo cards match your filter'}
                       </p>
                       <p className="text-xs text-slate-500 max-w-md mx-auto">
-                        Be the first to create a structured card and share its link in your class WhatsApp group.
+                        Create a structured request card to get a crawler-readable{' '}
+                        <code className="font-mono-num">/cards/:id</code> share link for your WhatsApp group.
                       </p>
-                      <button
-                        onClick={() => {
-                          setSelectedCategory('all');
-                          setSearchQuery('');
-                        }}
-                        className="px-3.5 py-2 rounded-xl bg-stone-100 text-xs font-semibold text-slate-800 cursor-pointer"
-                      >
-                        Reset Filters
-                      </button>
+                      <div className="flex justify-center gap-2">
+                        <button
+                          onClick={() => setActiveTab('create')}
+                          className="px-3.5 py-2 rounded-xl bg-[#E04F33] text-white text-xs font-semibold cursor-pointer"
+                        >
+                          + Create Request Card
+                        </button>
+                        {(selectedCategory !== 'all' || searchQuery) && (
+                          <button
+                            onClick={() => {
+                              setSelectedCategory('all');
+                              setSearchQuery('');
+                            }}
+                            className="px-3.5 py-2 rounded-xl bg-stone-100 text-xs font-semibold text-slate-800 cursor-pointer"
+                          >
+                            Reset Filters
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ) : (
                     <div className="space-y-3.5">
-                      {filteredCards.map((card) => (
-                        <article
-                          key={card.id}
-                          className="bg-white rounded-2xl border border-[#E6E2DC] p-5 space-y-3.5 transition hover:border-slate-300"
-                        >
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
-                              <span
-                                className={`text-xs font-semibold px-2.5 py-0.5 rounded-full border ${CATEGORY_META[card.category].badgeClass}`}
-                              >
-                                {CATEGORY_META[card.category].label}
-                              </span>
-                              <span className="inline-flex items-center gap-1 text-xs text-slate-500 font-mono-num">
-                                <Clock className="w-3.5 h-3.5" />
-                                {card.timeWindow}
-                              </span>
-                            </div>
-
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs font-mono-num font-semibold px-2.5 py-0.5 rounded-md bg-stone-100 text-slate-800">
-                                {card.spotsRemaining} of {card.spotsTotal} spots left
-                              </span>
-                              {card.isDemoFixture && (
-                                <span className="text-[11px] font-mono-num bg-amber-50 text-amber-900 border border-amber-200 px-2 py-0.5 rounded">
-                                  Demo Fixture
+                      {filteredCards.map((card) => {
+                        const isOwnedByBrowser = Boolean(vault.ownedCards[card.id]);
+                        return (
+                          <article
+                            key={card.id}
+                            className="bg-white rounded-2xl border border-[#E6E2DC] p-5 space-y-3.5 transition hover:border-slate-300"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`text-xs font-semibold px-2.5 py-0.5 rounded-full border ${
+                                    CATEGORY_META[card.category].badgeClass
+                                  }`}
+                                >
+                                  {CATEGORY_META[card.category].label}
                                 </span>
-                              )}
-                            </div>
-                          </div>
+                                <span className="inline-flex items-center gap-1 text-xs text-slate-500 font-mono-num">
+                                  <Clock className="w-3.5 h-3.5" />
+                                  {card.timeWindow}
+                                </span>
+                              </div>
 
-                          <div>
-                            <h3 className="font-display font-bold text-base text-slate-900">
-                              {card.title}
-                            </h3>
-                            <p className="text-sm text-slate-600 mt-1 leading-relaxed">
-                              {card.description}
-                            </p>
-                          </div>
-
-                          <div className="flex flex-wrap gap-1.5">
-                            {card.tags.map((tag) => (
-                              <span
-                                key={tag}
-                                className="text-[11px] px-2.5 py-0.5 rounded-md bg-[#FAF8F5] border border-stone-200 text-slate-700 font-medium"
-                              >
-                                #{tag}
-                              </span>
-                            ))}
-                          </div>
-
-                          <div className="pt-3 border-t border-stone-200/80 flex flex-wrap items-center justify-between gap-3">
-                            <div className="text-xs text-slate-600">
-                              Posted by{' '}
-                              <strong className="text-slate-900">{card.authorName}</strong>{' '}
-                              ({card.authorDepartment} • {card.authorYear})
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-mono-num font-semibold px-2.5 py-0.5 rounded-md bg-stone-100 text-slate-800">
+                                  {card.spotsRemaining} of {card.spotsTotal} spots left
+                                </span>
+                                {isOwnedByBrowser && (
+                                  <span className="text-[11px] font-mono-num bg-indigo-50 text-indigo-900 border border-indigo-200 px-2 py-0.5 rounded">
+                                    Your Card (Key Saved)
+                                  </span>
+                                )}
+                                {card.isDemoFixture && (
+                                  <span className="text-[11px] font-mono-num bg-amber-50 text-amber-900 border border-amber-200 px-2 py-0.5 rounded">
+                                    Demo Fixture
+                                  </span>
+                                )}
+                              </div>
                             </div>
 
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setReportedIds((prev) => [...prev, card.id]);
-                                  triggerToast('Card hidden from your feed and flagged.');
-                                }}
-                                title="Hide or Report Card"
-                                className="p-2 rounded-xl text-slate-400 hover:text-red-600 hover:bg-stone-100 cursor-pointer"
-                              >
-                                <Flag className="w-4 h-4" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleShareCard(card, false)}
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-slate-800 text-xs font-semibold cursor-pointer"
-                              >
-                                <Share2 className="w-3.5 h-3.5" />
-                                Share
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleShareCard(card, true)}
-                                className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 text-xs font-semibold cursor-pointer"
-                              >
-                                WhatsApp
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setActiveJoinCard(card)}
-                                className="px-3.5 py-1.5 rounded-xl bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-semibold cursor-pointer"
-                              >
-                                Request Handshake
-                              </button>
+                            <div>
+                              <h3 className="font-display font-bold text-base text-slate-900">
+                                {card.title}
+                              </h3>
+                              <p className="text-sm text-slate-600 mt-1 leading-relaxed">
+                                {card.description}
+                              </p>
                             </div>
-                          </div>
-                        </article>
-                      ))}
+
+                            <div className="flex flex-wrap gap-1.5">
+                              {card.tags.map((tag) => (
+                                <span
+                                  key={tag}
+                                  className="text-[11px] px-2.5 py-0.5 rounded-md bg-[#FAF8F5] border border-stone-200 text-slate-700 font-medium"
+                                >
+                                  #{tag}
+                                </span>
+                              ))}
+                            </div>
+
+                            <div className="pt-3 border-t border-stone-200/80 flex flex-wrap items-center justify-between gap-3">
+                              <div className="text-xs text-slate-600">
+                                Posted by{' '}
+                                <strong className="text-slate-900">
+                                  {card.authorName}
+                                </strong>{' '}
+                                ({card.authorDepartment} • {card.authorYear})
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleReportCard(card)}
+                                  title="Hide or Report Card"
+                                  className="p-2 rounded-xl text-slate-400 hover:text-red-600 hover:bg-stone-100 cursor-pointer"
+                                >
+                                  <Flag className="w-4 h-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleShareCard(card, false)}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-slate-800 text-xs font-semibold cursor-pointer"
+                                >
+                                  <Share2 className="w-3.5 h-3.5" />
+                                  Share URL
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleShareCard(card, true)}
+                                  className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 text-xs font-semibold cursor-pointer"
+                                >
+                                  WhatsApp
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={card.spotsRemaining <= 0}
+                                  onClick={() => setActiveJoinCard(card)}
+                                  className="px-3.5 py-1.5 rounded-xl bg-[#0F172A] hover:bg-slate-800 disabled:bg-stone-300 text-white text-xs font-semibold cursor-pointer"
+                                >
+                                  {card.spotsRemaining <= 0
+                                    ? 'Filled'
+                                    : 'Request Handshake'}
+                                </button>
+                              </div>
+                            </div>
+                          </article>
+                        );
+                      })}
                     </div>
                   )}
                 </>
               ) : (
-                /* Events & Clubs Sub-Tab */
+                /* Events & Milestones Sub-Tab */
                 <div className="space-y-4">
-                  <div className="p-3.5 rounded-xl bg-stone-100 border border-[#E6E2DC] text-xs text-slate-700 flex items-center justify-between">
-                    <span>
-                      Events below are labelled demo fixtures showing how verified club schedules and buddy-matching work without scraping stale website news.
-                    </span>
+                  <div className="p-3.5 rounded-xl bg-stone-100 border border-[#E6E2DC] text-xs text-slate-700">
+                    {dataMode === 'shared_api'
+                      ? 'Showing verified portal milestones from D1. Unverified events are never labelled as official.'
+                      : 'Showing labelled Demo Sandbox events.'}
                   </div>
 
-                  {events.map((evt) => {
+                  {activeEvents.map((evt) => {
                     const isBuddyJoined = buddyRsvpIds.includes(evt.id);
                     return (
                       <article
@@ -1317,7 +1758,13 @@ export default function App() {
                           <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-900 border border-indigo-200">
                             {evt.category} • {evt.organizer}
                           </span>
-                          <span className="text-[11px] font-mono-num bg-amber-50 text-amber-900 border border-amber-200 px-2 py-0.5 rounded">
+                          <span
+                            className={`text-[11px] font-mono-num px-2 py-0.5 rounded border ${
+                              evt.verificationSource === 'Official VGU Link'
+                                ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                                : 'bg-amber-50 text-amber-900 border-amber-200'
+                            }`}
+                          >
                             {evt.verificationSource}
                           </span>
                         </div>
@@ -1335,11 +1782,22 @@ export default function App() {
                           <div className="text-xs text-slate-600 font-mono-num">
                             <strong>{evt.goingCount}</strong> interested •{' '}
                             <strong className="text-[#E04F33]">
-                              {evt.lookingForBuddyCount} looking for an event buddy
+                              {evt.lookingForBuddyCount} open to attending with a peer
                             </strong>
                           </div>
 
                           <div className="flex flex-wrap items-center gap-2">
+                            {evt.registrationUrl && (
+                              <a
+                                href={evt.registrationUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-slate-800 text-xs font-semibold"
+                              >
+                                Official Link
+                                <ExternalLink className="w-3 h-3" />
+                              </a>
+                            )}
                             <a
                               href={buildGoogleCalendarUrl(evt)}
                               target="_blank"
@@ -1384,13 +1842,18 @@ export default function App() {
              ========================================================= */}
           {activeTab === 'create' && (
             <section className="bg-white rounded-2xl border border-[#E6E2DC] p-5 md:p-6 space-y-5">
-              <div>
-                <h2 className="font-display font-bold text-lg text-slate-900">
-                  Post a Structured Campus Request Card
-                </h2>
-                <p className="text-xs text-slate-600 mt-1">
-                  Designed to be shared directly into your class or club WhatsApp group. Your phone number is never shown publicly.
-                </p>
+              <div className="flex flex-wrap items-start justify-between gap-2 border-b border-stone-200 pb-3">
+                <div>
+                  <h2 className="font-display font-bold text-lg text-slate-900">
+                    Post a Structured Campus Request Card
+                  </h2>
+                  <p className="text-xs text-slate-600 mt-1">
+                    Public cards never expose phone numbers or emails. Your private coordination note is revealed only to peers whose handshake you accept.
+                  </p>
+                </div>
+                <span className="text-xs font-mono-num px-2.5 py-1 rounded-md bg-stone-100 text-slate-800">
+                  Target: {dataMode === 'shared_api' ? 'Shared D1 Database' : 'Local Demo'}
+                </span>
               </div>
 
               {createError && (
@@ -1429,6 +1892,8 @@ export default function App() {
                     </span>
                     <input
                       type="text"
+                      required
+                      maxLength={80}
                       value={createWindow}
                       onChange={(e) => setCreateWindow(e.target.value)}
                       placeholder="e.g., Friday 4:15 PM or This Weekend"
@@ -1439,11 +1904,13 @@ export default function App() {
 
                 <label className="block space-y-1">
                   <span className="text-xs font-semibold text-slate-700">
-                    Headline (What do you need?)
+                    Headline (10–120 characters, no phone numbers)
                   </span>
                   <input
                     type="text"
-                    maxLength={100}
+                    required
+                    minLength={10}
+                    maxLength={120}
                     value={createTitle}
                     onChange={(e) => setCreateTitle(e.target.value)}
                     placeholder="e.g., Need 1 UI Designer for SIH Internal Round"
@@ -1453,14 +1920,16 @@ export default function App() {
 
                 <label className="block space-y-1">
                   <span className="text-xs font-semibold text-slate-700">
-                    Details & Expectations (No phone numbers in public text)
+                    Public Description (15–400 characters, no phone numbers/emails)
                   </span>
                   <textarea
                     rows={3}
-                    maxLength={280}
+                    required
+                    minLength={15}
+                    maxLength={400}
                     value={createDesc}
                     onChange={(e) => setCreateDesc(e.target.value)}
-                    placeholder="Describe skills needed, meeting spot (e.g., Central Library), or fare split details..."
+                    placeholder="Describe skills needed, study topic, or cab route..."
                     className="w-full px-3 py-2.5 rounded-xl border border-stone-300 text-sm"
                   />
                 </label>
@@ -1472,6 +1941,9 @@ export default function App() {
                     </span>
                     <input
                       type="text"
+                      required
+                      minLength={2}
+                      maxLength={50}
                       value={createAuthor}
                       onChange={(e) => setCreateAuthor(e.target.value)}
                       placeholder="e.g., Alok T."
@@ -1484,6 +1956,9 @@ export default function App() {
                     </span>
                     <input
                       type="text"
+                      required
+                      minLength={2}
+                      maxLength={60}
                       value={createDept}
                       onChange={(e) => setCreateDept(e.target.value)}
                       className="w-full px-3 py-2 rounded-xl border border-stone-300 text-sm"
@@ -1496,18 +1971,21 @@ export default function App() {
                     <div className="flex gap-2">
                       <select
                         value={createYear}
-                        onChange={(e) => setCreateYear(e.target.value)}
+                        onChange={(e) =>
+                          setCreateYear(e.target.value as AcademicYear)
+                        }
                         className="flex-1 px-2.5 py-2 rounded-xl border border-stone-300 text-sm bg-white"
                       >
-                        <option>1st Year</option>
-                        <option>2nd Year</option>
-                        <option>3rd Year</option>
-                        <option>4th Year</option>
+                        <option value="1st Year">1st Year</option>
+                        <option value="2nd Year">2nd Year</option>
+                        <option value="3rd Year">3rd Year</option>
+                        <option value="4th Year">4th Year</option>
+                        <option value="PG / Research">PG / Research</option>
                       </select>
                       <input
                         type="number"
                         min={1}
-                        max={10}
+                        max={20}
                         value={createSpots}
                         onChange={(e) => setCreateSpots(Number(e.target.value))}
                         className="w-16 px-2.5 py-2 rounded-xl border border-stone-300 font-mono-num text-sm text-center"
@@ -1530,14 +2008,12 @@ export default function App() {
                   </label>
                   <label className="block space-y-1">
                     <span className="text-xs font-semibold text-slate-700">
-                      Preferred Handshake Method (After Approval)
+                      Preferred Coordination Channel
                     </span>
                     <select
                       value={createChannel}
                       onChange={(e) =>
-                        setCreateChannel(
-                          e.target.value as PulseCard['preferredHandshakeChannel']
-                        )
+                        setCreateChannel(e.target.value as HandshakeChannel)
                       }
                       className="w-full px-3 py-2 rounded-xl border border-stone-300 text-sm bg-white"
                     >
@@ -1550,6 +2026,29 @@ export default function App() {
                   </label>
                 </div>
 
+                {/* Private Coordination Note (Held on Server, Revealed Only Upon Acceptance) */}
+                <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-1.5">
+                  <label className="block space-y-1">
+                    <span className="text-xs font-semibold text-emerald-950 flex items-center gap-1.5">
+                      <Lock className="w-3.5 h-3.5 text-emerald-800" />
+                      Private Coordination Note (Hidden from public card & crawlers)
+                    </span>
+                    <input
+                      type="text"
+                      required
+                      minLength={5}
+                      maxLength={200}
+                      value={createCoordinationNote}
+                      onChange={(e) => setCreateCoordinationNote(e.target.value)}
+                      placeholder="e.g., Meet at Central Library 2nd floor at 3:15 PM, or ping Telegram @myhandle"
+                      className="w-full px-3 py-2 rounded-xl bg-white border border-emerald-300 text-sm"
+                    />
+                  </label>
+                  <p className="text-[11px] text-emerald-900">
+                    This note is stored privately in D1 and is only shown to a student after you explicitly click <strong>Accept</strong> on their handshake request.
+                  </p>
+                </div>
+
                 <div className="pt-2 flex items-center justify-end gap-3">
                   <button
                     type="button"
@@ -1560,9 +2059,12 @@ export default function App() {
                   </button>
                   <button
                     type="submit"
-                    className="px-5 py-2.5 rounded-xl bg-[#E04F33] hover:bg-[#c94127] text-white text-xs font-semibold shadow-xs cursor-pointer"
+                    disabled={isSubmitting}
+                    className="px-5 py-2.5 rounded-xl bg-[#E04F33] hover:bg-[#c94127] disabled:opacity-50 text-white text-xs font-semibold shadow-xs cursor-pointer"
                   >
-                    Publish Card & Get Share Link
+                    {isSubmitting
+                      ? 'Publishing...'
+                      : 'Publish Card & Save Owner Key'}
                   </button>
                 </div>
               </form>
@@ -1570,7 +2072,7 @@ export default function App() {
           )}
 
           {/* =========================================================
-              TAB 5: CONNECT (SAFE HANDSHAKES & DATA CONTROLS)
+              TAB 5: CONNECT (SAFE HANDSHAKES & CAPABILITY KEYS)
              ========================================================= */}
           {activeTab === 'connect' && (
             <div className="space-y-6">
@@ -1578,110 +2080,107 @@ export default function App() {
                 <div className="flex items-start justify-between gap-3 border-b border-stone-200 pb-3">
                   <div>
                     <h2 className="font-display font-bold text-base text-slate-900">
-                      Structured Connection Handshakes (Not Random Chat)
+                      Authorized Connection Handshakes ({dataMode === 'shared_api' ? 'Shared D1' : 'Demo Sandbox'})
                     </h2>
                     <p className="text-xs text-slate-500">
-                      VGU Pulse does not expose your phone number publicly. You review a peer's intro note first, then accept to coordinate.
+                      Authenticated via your browser's capability-token vault. Accepting an incoming request reveals your card's private coordination note to that peer.
                     </p>
                   </div>
-                  <Lock className="w-5 h-5 text-emerald-700 shrink-0" />
+                  <KeyRound className="w-5 h-5 text-emerald-700 shrink-0" />
                 </div>
 
-                <div className="space-y-3">
-                  {handshakes.map((hs) => (
-                    <div
-                      key={hs.id}
-                      className="p-4 rounded-xl bg-[#FAF8F5] border border-[#E6E2DC] space-y-2.5"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-xs font-semibold text-slate-800">
-                          {hs.direction === 'incoming' ? 'Incoming Request' : 'Sent Request'} •{' '}
-                          <span className="text-slate-500">{hs.createdAtLabel}</span>
-                        </span>
-                        <span
-                          className={`text-[11px] font-mono-num font-semibold px-2.5 py-0.5 rounded-full ${
-                            hs.status === 'accepted'
-                              ? 'bg-emerald-100 text-emerald-900'
-                              : hs.status === 'declined'
-                              ? 'bg-stone-200 text-slate-600'
-                              : 'bg-amber-100 text-amber-900'
-                          }`}
-                        >
-                          {hs.status.toUpperCase()}
-                        </span>
-                      </div>
+                {activeHandshakes.length === 0 ? (
+                  <div className="p-6 text-center rounded-xl bg-[#FAF8F5] border border-[#E6E2DC] space-y-2">
+                    <p className="font-display font-bold text-sm text-slate-800">
+                      No handshake requests for your browser keys yet
+                    </p>
+                    <p className="text-xs text-slate-500 max-w-md mx-auto">
+                      When you publish a card or request to join someone else's card, your browser saves an unguessable capability token so you can check responses here without creating an account.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {activeHandshakes.map((hs) => (
+                      <div
+                        key={hs.id}
+                        className="p-4 rounded-xl bg-[#FAF8F5] border border-[#E6E2DC] space-y-2.5"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-semibold text-slate-800">
+                            {hs.direction === 'incoming'
+                              ? 'Incoming Request (On Your Card)'
+                              : 'Sent Request (Your Application)'}{' '}
+                            • <span className="text-slate-500">{hs.createdAtLabel}</span>
+                          </span>
+                          <span
+                            className={`text-[11px] font-mono-num font-semibold px-2.5 py-0.5 rounded-full ${
+                              hs.status === 'accepted'
+                                ? 'bg-emerald-100 text-emerald-900'
+                                : hs.status === 'declined'
+                                ? 'bg-stone-200 text-slate-600'
+                                : 'bg-amber-100 text-amber-900'
+                            }`}
+                          >
+                            {hs.status.toUpperCase()}
+                          </span>
+                        </div>
 
-                      <p className="text-xs font-semibold text-slate-600">
-                        Card: "{hs.cardTitle}"
-                      </p>
-                      <p className="text-sm text-slate-900 bg-white p-3 rounded-lg border border-stone-200">
-                        <strong>
-                          {hs.fromStudentName} ({hs.fromDepartment}, {hs.fromYear}):
-                        </strong>{' '}
-                        {hs.introNote}
-                      </p>
+                        <p className="text-xs font-semibold text-slate-600">
+                          Card: "{hs.cardTitle}"
+                        </p>
+                        <p className="text-sm text-slate-900 bg-white p-3 rounded-lg border border-stone-200">
+                          <strong>
+                            {hs.fromStudentName} ({hs.fromDepartment}, {hs.fromYear}):
+                          </strong>{' '}
+                          {hs.introNote}
+                        </p>
 
-                      <div className="flex items-center justify-between pt-1">
-                        <span className="text-xs text-emerald-800 font-medium">
-                          {hs.revealedContactNote}
-                        </span>
-                        {hs.direction === 'incoming' && hs.status === 'pending' && (
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setHandshakes((prev) =>
-                                  prev.map((item) =>
-                                    item.id === hs.id
-                                      ? {
-                                          ...item,
-                                          status: 'declined',
-                                          revealedContactNote: 'Request declined.',
-                                        }
-                                      : item
-                                  )
-                                )
-                              }
-                              className="px-3 py-1.5 rounded-lg bg-stone-200 text-slate-700 text-xs font-semibold cursor-pointer"
-                            >
-                              Decline
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setHandshakes((prev) =>
-                                  prev.map((item) =>
-                                    item.id === hs.id
-                                      ? {
-                                          ...item,
-                                          status: 'accepted',
-                                          revealedContactNote:
-                                            '✓ Handshake Accepted! Coordinate at Central Library / via your chosen channel.',
-                                        }
-                                      : item
-                                  )
-                                );
-                                triggerToast('Handshake accepted!');
-                              }}
-                              className="px-3 py-1.5 rounded-lg bg-emerald-700 text-white text-xs font-semibold cursor-pointer"
-                            >
-                              Accept & Reveal Handshake
-                            </button>
-                          </div>
-                        )}
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                          <span className="text-xs text-emerald-900 font-medium">
+                            {hs.revealedContactNote}
+                          </span>
+                          {hs.direction === 'incoming' && hs.status === 'pending' && (
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                disabled={isSubmitting}
+                                onClick={() =>
+                                  handleHandshakeDecision(hs, 'declined')
+                                }
+                                className="px-3 py-1.5 rounded-lg bg-stone-200 text-slate-700 text-xs font-semibold cursor-pointer"
+                              >
+                                Decline
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isSubmitting}
+                                onClick={() =>
+                                  handleHandshakeDecision(hs, 'accepted')
+                                }
+                                className="px-3 py-1.5 rounded-lg bg-emerald-700 text-white text-xs font-semibold cursor-pointer"
+                              >
+                                Accept & Reveal Note
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </section>
 
-              {/* Local Data & Privacy Reset */}
+              {/* Capability Vault & Local Data Controls */}
               <section className="bg-white rounded-2xl border border-[#E6E2DC] p-5 space-y-3">
                 <h3 className="font-display font-bold text-sm text-slate-900">
-                  Local Device Storage & Demo Reset
+                  Browser Capability Vault & Local Storage
                 </h3>
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  All attendance counts, SGPA rows, planner tasks, and custom cards created in Stage 1 are stored in your browser's local storage (`vgu_pulse_next_v1_*`).
+                <p className="text-xs text-slate-600 leading-relaxed font-mono-num">
+                  Owned Card Keys: {Object.keys(vault.ownedCards).length} • Sent Handshake Keys:{' '}
+                  {Object.keys(vault.sentHandshakes).length}
+                </p>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Security note: Clearing local data removes your browser's capability keys for previously published anonymous cards as well as local calculator/planner state.
                 </p>
                 <button
                   type="button"
@@ -1691,7 +2190,7 @@ export default function App() {
                   }}
                   className="px-4 py-2 rounded-xl border border-red-300 text-red-700 hover:bg-red-50 text-xs font-semibold cursor-pointer"
                 >
-                  Reset Local Data to Default Demo Fixtures
+                  Clear Browser Vault & Reset Local State
                 </button>
               </section>
             </div>
@@ -1734,37 +2233,43 @@ export default function App() {
                 <input
                   type="text"
                   required
+                  minLength={2}
+                  maxLength={50}
                   value={joinName}
                   onChange={(e) => setJoinName(e.target.value)}
-                  placeholder="e.g.,Vikram R."
+                  placeholder="e.g., Vikram R."
                   className="w-full px-3 py-2 rounded-xl border border-stone-300 text-sm"
                 />
               </label>
               <div className="grid grid-cols-2 gap-2">
                 <input
                   type="text"
+                  required
                   value={joinDept}
                   onChange={(e) => setJoinDept(e.target.value)}
                   className="px-3 py-2 rounded-xl border border-stone-300 text-xs"
                 />
                 <select
                   value={joinYear}
-                  onChange={(e) => setJoinYear(e.target.value)}
+                  onChange={(e) => setJoinYear(e.target.value as AcademicYear)}
                   className="px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white"
                 >
-                  <option>1st Year</option>
-                  <option>2nd Year</option>
-                  <option>3rd Year</option>
-                  <option>4th Year</option>
+                  <option value="1st Year">1st Year</option>
+                  <option value="2nd Year">2nd Year</option>
+                  <option value="3rd Year">3rd Year</option>
+                  <option value="4th Year">4th Year</option>
+                  <option value="PG / Research">PG / Research</option>
                 </select>
               </div>
               <label className="block space-y-1">
                 <span className="text-xs font-semibold text-slate-700">
-                  Short Intro Note (Why you're joining / relevant skill)
+                  Short Intro Note (8–280 chars: relevant skill or timing)
                 </span>
                 <textarea
                   rows={2}
                   required
+                  minLength={8}
+                  maxLength={280}
                   value={joinNote}
                   onChange={(e) => setJoinNote(e.target.value)}
                   placeholder="e.g., I'm free at 4:15 PM at Main Gate to split the cab to Jaipur Junction!"
@@ -1782,9 +2287,10 @@ export default function App() {
                 </button>
                 <button
                   type="submit"
+                  disabled={isSubmitting}
                   className="px-4 py-2 rounded-xl bg-[#0F172A] text-white text-xs font-semibold cursor-pointer"
                 >
-                  Send Handshake Request
+                  {isSubmitting ? 'Sending...' : 'Send Handshake Request'}
                 </button>
               </div>
             </form>
