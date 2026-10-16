@@ -55,6 +55,7 @@ D1 database/persistence directory. Confirm row counts, indexes, and
 `PRAGMA foreign_key_check` before applying anything to a database containing useful data.
 
 ```bash
+python3 scripts/test_stage2_migrations.py
 npx wrangler d1 migrations list vgu-pulse-db --local
 npx wrangler d1 migrations apply vgu-pulse-db --local
 
