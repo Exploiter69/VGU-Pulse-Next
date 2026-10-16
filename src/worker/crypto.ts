@@ -104,7 +104,7 @@ async function deriveAesGcmKey(secret: string): Promise<CryptoKey> {
 /**
  * Encrypts a plaintext coordination note using AES-256-GCM with a unique 96-bit random IV.
  * Output format: `enc:v1:<24-char-iv-hex>:<ciphertext+tag-hex>`
- * Fitting well within the D1 500-char storage bound for <=200 char notes.
+ * The D1 CHECK constraint allows up to 1500 stored characters, covering UTF-8 ciphertext for <=200 UTF-16 code units.
  */
 export async function encryptCoordinationNote(
   plaintext: string,
