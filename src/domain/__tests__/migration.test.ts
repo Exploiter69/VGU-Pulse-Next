@@ -1,14 +1,6 @@
-import { readFileSync } from 'node:fs';
+import migration003 from '../../../migrations/0003_stage2_hardening.sql?raw';
+import migration004 from '../../../migrations/0004_expand_encrypted_coordination_note.sql?raw';
 import { describe, expect, it } from 'vitest';
-
-const migration003 = readFileSync(
-  new URL('../../../migrations/0003_stage2_hardening.sql', import.meta.url),
-  'utf8'
-);
-const migration004 = readFileSync(
-  new URL('../../../migrations/0004_expand_encrypted_coordination_note.sql', import.meta.url),
-  'utf8'
-);
 
 describe('Stage 2 forward migration safety', () => {
   it('fails instead of silently ignoring rows while rebuilding campus_events', () => {
