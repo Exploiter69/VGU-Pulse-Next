@@ -14,13 +14,13 @@ describe('Stage 2 forward migration safety', () => {
   it('fails instead of silently ignoring rows while rebuilding campus_events', () => {
     expect(migration003).toContain('INSERT INTO campus_events_new (');
     expect(migration003).not.toMatch(
-      /INSERT\\s+OR\\s+IGNORE\\s+INTO\\s+campus_events_new/i
+      /INSERT\s+OR\s+IGNORE\s+INTO\s+campus_events_new/i
     );
   });
 
   it('expands encrypted-note storage and copies handshake/report rows before table replacement', () => {
     expect(migration004).toMatch(
-      /coordination_note TEXT NOT NULL CHECK \\(length\\(coordination_note\\) BETWEEN 5 AND 1500\\)/
+      /coordination_note TEXT NOT NULL CHECK \(length\(coordination_note\) BETWEEN 5 AND 1500\)/
     );
     expect(migration004).toContain('INSERT INTO pulse_cards_new');
     expect(migration004).toContain('FROM pulse_cards;');
