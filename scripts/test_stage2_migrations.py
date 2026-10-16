@@ -64,7 +64,7 @@ def main() -> None:
 
     migration003 = (MIGRATIONS / "0003_stage2_hardening.sql").read_text(encoding="utf-8")
     require(
-        "INSERT OR IGNORE INTO campus_events_new" not in migration003.upper(),
+        "INSERT OR IGNORE INTO CAMPUS_EVENTS_NEW" not in migration003.upper(),
         "0003 must not silently ignore event rows",
     )
     apply("0003_stage2_hardening.sql")
@@ -72,10 +72,6 @@ def main() -> None:
     require(count(db, "pulse_cards") == 1, "0003 changed the card count")
     require(count(db, "handshake_requests") == 1, "0003 changed the handshake count")
     require(count(db, "campus_events") == 2, "0003 did not preserve both seeded events")
-    require(
-        count(db, "campus_events") == count(db, "campus_events"),
-        "event count mismatch",
-    )
     sources = {
         row[0]
         for row in db.execute(
