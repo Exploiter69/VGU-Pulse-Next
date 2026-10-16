@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS campus_events_new (
   created_at TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO campus_events_new (
+INSERT INTO campus_events_new (
   id, title, organizer, category, date_label, time_label, venue,
   registration_url, verification_source, going_count, looking_for_buddy_count,
   status, created_at
