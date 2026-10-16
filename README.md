@@ -5,7 +5,7 @@ Student-first utility toolkit, structured collaboration request board, and campu
 ## Architecture & Security Guarantees
 - **Frontend:** React 18, TypeScript, Tailwind CSS v4, Vite 6
 - **Backend API & Edge HTMLRewriter:** Cloudflare Workers (`src/worker/index.ts`)
-- **Database & Migrations:** Cloudflare D1 SQLite (`migrations/0001_initial_schema.sql`, `migrations/0002_seed_verified_events.sql`, `migrations/0003_stage2_hardening.sql`)
+- **Database & Migrations:** Cloudflare D1 SQLite (`migrations/0001_initial_schema.sql`, `migrations/0002_seed_verified_events.sql`, `migrations/0003_stage2_hardening.sql`, `migrations/0004_expand_encrypted_coordination_note.sql`)
 - **Hardened Security & Concurrency Model:**
   - **AES-256-GCM Encryption at Rest:** Private `coordinationNote` values are encrypted via Web Crypto (`AES-GCM`, 256-bit key derived from `COORDINATION_ENCRYPTION_KEY`, random 96-bit IV per record) before being written to D1. Plaintext notes are never stored in new records, never returned in public card APIs or OpenGraph metadata, and only decrypted for authorized handshake participants after explicit owner acceptance.
   - **Atomic Handshake Capacity & Lifecycle Transitions:** Uses conditional SQL updates inside `db.batch()` to prevent double-decrementing, overbooking the last available spot under concurrent acceptances, or leaving capacity out of sync when an accepted handshake is later declined/cancelled.
