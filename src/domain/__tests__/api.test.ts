@@ -406,6 +406,17 @@ describe('P0: AES-256-GCM Coordination-Note Encryption at Rest', () => {
     );
     expect(wrongKeyResult.ok).toBe(false);
   });
+
+  it('round-trips a maximum-length Unicode note within the expanded D1 constraint', async () => {
+    // 200 BMP Unicode characters encode to 600 UTF-8 bytes; the encrypted hex payload
+    // must fit the 1500-character storage constraint introduced by migration 0004.
+    const note = '界'.repeat(200);
+    const encrypted = await encryptCoordinationNote(note, DEV_DEFAULT_ENCRYPTION_SECRET);
+
+    expect(encrypted.length).toBeLessThanOrEqual(1500);
+    const result = await decryptCoordinationNote(encrypted, DEV_DEFAULT_ENCRYPTION_SECRET);
+    expect(result).toEqual({ ok: true, plaintext: note });
+  });
 });
 
 describe('P0: Handshake Capacity & Lifecycle Integrity', () => {
