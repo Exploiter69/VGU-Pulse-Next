@@ -29,3 +29,59 @@ Student-first utility toolkit, structured collaboration request board, and campu
 ---
 
 ## Local Verification & Migration Commands (Fedora Linux)
+
+These commands apply migrations to the **local Wrangler D1 database only**. Do not add
+`--remote` or deploy until the disposable migration test, application tests, key
+configuration, and legacy-note plan have been reviewed.
+
+### Local setup
+
+```bash
+cd ~/VGU-Pulse-Next
+git status --short                 # preserve local changes before syncing
+npm install
+```
+
+Create `.dev.vars` if needed and set development-only values. Do not commit this file.
+
+```bash
+cp .dev.vars.example .dev.vars     # only if .dev.vars does not already exist
+```
+
+### Migration and verification
+
+First inspect migration status and test the full migration sequence on a disposable
+D1 database/persistence directory. Confirm row counts, indexes, and
+`PRAGMA foreign_key_check` before applying anything to a database containing useful data.
+
+```bash
+npx wrangler d1 migrations list vgu-pulse-db --local
+npx wrangler d1 migrations apply vgu-pulse-db --local
+
+npm run check
+npm test
+npm run build
+git diff --check
+npm audit --omit=dev
+```
+
+Migration `0004_expand_encrypted_coordination_note.sql` rebuilds
+`pulse_cards`, `handshake_requests`, and `card_reports` to raise the stored
+coordination-note limit to 1500 characters. It copies all rows and recreates their
+indexes and foreign keys. Validate it on a disposable database before applying it
+to any database with real data.
+
+### Production gate
+
+- Configure a unique, strong `COORDINATION_ENCRYPTION_KEY`, `RATE_LIMIT_SALT`,
+  `TURNSTILE_SECRET_KEY`, the production D1 binding, `PUBLIC_ORIGIN`, and
+  Turnstile site key.
+- Existing plaintext coordination notes are deliberately not decrypted or returned
+  by the new code. Before production rollout, inventory and securely re-encrypt any
+  legacy notes with the intended production key; never print note contents in logs.
+- Confirm the migration list and take a recoverable database backup before applying
+  migrations remotely. Do not use development secrets in production.
+- `npx wrangler deploy --dry-run` checks bundle compatibility only; it does not
+  validate production secrets, production database state, or live service behavior.
+- Run the full verification suite again after syncing the branch. Do not use
+  `npm audit fix --force` as a blanket fix for development dependency advisories.
